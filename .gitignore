@@ -54,3 +54,7 @@ AGENTS.md
 # src/agents/: local-only sub-agent implementations; keep empty folder
 src/agents/*
 !src/agents/.gitkeep
+
+# src/graph/: LangGraph orchestration; keep empty folder
+src/graph/*
+!src/graph/.gitkeep
