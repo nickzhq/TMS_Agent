@@ -1,0 +1,26 @@
+# Application configuration
+# Sensitive values use env vars ${...} (see .env.example); this file is committable (no plaintext secrets)
+
+llm:
+  base_url: ${LLM_BASE_URL}     # OpenAI-compatible endpoint (provider-switchable)
+  api_key:  ${LLM_API_KEY}
+  model:    ${LLM_MODEL}
+
+db:                             # pyodbc direct connection (read-only account, credentials via env vars)
+  connection_string: ${MSSQL_CONNECTION_STRING}   # preferred: full string (expanded from .env; real value only in .env, never written here)
+  host:     ${MSSQL_HOST}       # fallback: separate fields (used when connection_string is empty; host must include port)
+  database: ${MSSQL_DB}
+  user:     ${MSSQL_USER}
+  password: ${MSSQL_PASSWORD}
+
+amap:
+  api_key:  ${AMAP_MAPS_API_KEY}
+
+memory:
+  enabled: true                 # mem0: stores user preferences only
+  provider: mem0
+
+knowledge_base:
+  enabled: false                # WeKnora disabled by default (wired but off); set true once deployed
+  provider: weknora
+  url: ${WEKNORA_URL}
