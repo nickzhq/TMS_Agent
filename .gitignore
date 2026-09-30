@@ -59,3 +59,7 @@ AGENTS.md
 # src/agents/: business sub-agent node implementations (P3+); keep empty folder
 src/agents/*
 !src/agents/.gitkeep
+
+# src/graph/: LangGraph orchestration (business flow, P4+); keep empty folder
+src/graph/*
+!src/graph/.gitkeep
