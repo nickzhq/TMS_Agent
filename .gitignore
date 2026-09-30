@@ -55,3 +55,7 @@ AGENTS.md
 
 # any SQL asset
 *.sql
+
+# src/agents/: business sub-agent node implementations (P3+); keep empty folder
+src/agents/*
+!src/agents/.gitkeep
