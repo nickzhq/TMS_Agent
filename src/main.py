@@ -11,7 +11,7 @@ from src.config.settings import load_settings
 def main() -> None:
     settings = load_settings()
 
-    print("=== Logistics Quotation System · bootstrap ===")
+    print("=== Logistics Quotation System - bootstrap ===")
     print(f"LLM      : model={settings.llm.model or '<unset>'} base_url={settings.llm.base_url or '<unset>'}")
     print(f"DB       : {'configured' if settings.db.host else '<unset>'} (host / database / password redacted)")
     print(f"Amap     : api_key={'configured' if settings.amap.api_key else '<unset>'}")

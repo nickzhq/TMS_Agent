@@ -1,26 +1,26 @@
-# EstimatePrice Agent - Python 依赖
-# 用户自行安装：pip install -r requirements.txt（AI 不自动装包）
-# 技术选型见 docs/architecture.md 第三节 / record.md 第十节
+# Python dependencies
+# Install yourself: pip install -r requirements.txt (the assistant does not auto-install)
 
-langgraph>=0.2          # 编排框架（图状态机 + interrupt + checkpoint）
-langchain-core          # LangGraph 依赖（State / 消息基类）
-openai>=1.0             # 裸 OpenAI 兼容 SDK（切 base_url 调 Qwen/DeepSeek/自定义）
-mem0ai                  # 记忆层（仅用户偏好）
-pydantic>=2.0           # 配置模型 + State 校验
-pyyaml                  # config.yaml 解析
-python-dotenv           # 环境变量（DB 连接串 / API key，绝不入库）
-mcp                     # 高德 MCP 客户端（maps_geo）；DB 已改 pyodbc 直连
-pyodbc                  # DB 直连 SQL Server（跑标准 T-SQL，含 CTE/DECLARE/多语句）
+langgraph>=0.2          # orchestration (graph state machine + interrupt + checkpoint)
+langchain-core          # LangGraph dependency (State / message base classes)
+openai>=1.0             # bare OpenAI-compatible SDK (switch base_url for any provider)
+mem0ai                  # memory layer (user preferences only)
+pydantic>=2.0           # config models + state validation
+pyyaml                  # config.yaml parsing
+python-dotenv           # env vars (DB connection string / API key, never committed)
+mcp                     # map-service MCP client (geocoding); DB uses pyodbc directly
+pyodbc                  # direct SQL Server connection (runs standard T-SQL: CTE/DECLARE/multi-statement)
 
-# 界面 / API / 持久化（2026-09-30 形态调整：网页应用）
-fastapi                 # API 层（REST 会话 + WebSocket 流式/HITL）
-uvicorn                 # ASGI 服务器（跑 FastAPI）
-chainlit                # 前端阶段1（对话 UI，纯 Python，MVP）
-langgraph-checkpoint-sqlite  # 会话持久化 Checkpointer（SQLite 起步）
-websockets              # WebSocket（流式 + HITL 双向）
-aiosqlite               # 异步 SQLite（FastAPI 异步）
+# Web UI / API / persistence
+fastapi                 # API layer (REST sessions + WebSocket streaming / HITL)
+uvicorn                 # ASGI server (runs FastAPI)
+chainlit                # chat UI (pure Python, MVP)
+langgraph-checkpoint-sqlite  # session persistence checkpointer (SQLite to start)
+websockets              # WebSocket (streaming + HITL bidirectional)
+aiosqlite               # async SQLite (FastAPI async)
 
-# 注：pyodbc 需系统装 ODBC Driver for SQL Server（微软官方驱动）
-# 注：SQLite 是 Python 内置（sqlite3），无需额外装
-# 注：前端阶段2 CopilotKit 是 React（需 Node.js，届时另装）；多用户生产用 langgraph-checkpoint-postgres + PostgreSQL
-# 注：WeKnora 是 Go 服务（REST/MCP 调用），不在此列；LiteLLM 未来需要再加
+# Notes:
+# - pyodbc requires the system-level ODBC Driver for SQL Server (Microsoft official driver)
+# - SQLite is built into Python (sqlite3); no extra install needed
+# - multi-user production: swap in langgraph-checkpoint-postgres + PostgreSQL
+# - the knowledge base is an external Go service (called via REST/MCP), not a Python package
