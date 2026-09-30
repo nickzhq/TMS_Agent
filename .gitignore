@@ -1,0 +1,57 @@
+# Qoder local MCP config (contains DB connection info, never commit)
+.qoder-cn/mcp.json
+
+# Node
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# Environment files (real credentials, never commit)
+.env
+.env.local
+.env.*.local
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Local-only notes (dev progress / resume material / temp logs, not uploaded)
+progress.md
+record.md
+tmp_res.md
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+.pytest_cache/
+
+# --- Company assets: business docs / data / SQL / manuals are managed separately, NOT uploaded ---
+# Only empty directories (via .gitkeep placeholders) are shown in the repo.
+
+# docs/: business documents (DB schema, product spec)
+docs/*
+!docs/.gitkeep
+
+# data/: geocoding cache and other runtime data
+data/*
+!data/.gitkeep
+
+# tests/: contain business parameters and depend on untracked SQL / DB
+tests/*
+!tests/.gitkeep
+
+# agents/: business manuals (SKILL.md / README.md) + SQL; keep the 5 empty sub-folders
+agents/*/*
+!agents/*/.gitkeep
+
+# AGENTS.md: root AI constitution (business rules + table names)
+AGENTS.md
+
+# any SQL asset
+*.sql
