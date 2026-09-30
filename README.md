@@ -2,7 +2,7 @@
 
 > **资产说明**：`/docs` 和 `/data` 以及其他 SQL 均涉及公司资产，需另外管理，不在此项目中体现。本项目只展示系统技术骨架。
 >
-> 同理，业务执行手册（`/agents` 下的 SKILL.md / README.md）、`AGENTS.md`、`/tests` 也涉及公司业务口径与数据，不在本仓库体现，仅保留空目录占位。
+> 同理，业务执行手册（`/agents` 下的 SKILL.md / README.md）、`AGENTS.md`、`/tests`、以及 `src/agents/`（子 Agent 业务节点实现）也涉及公司业务口径与数据，不在本仓库体现，仅保留空目录占位。
 
 ---
 
@@ -47,7 +47,7 @@
 src/
 ├── config/       # 配置层（pydantic 模型 + ${ENV} 展开）
 ├── graph/        # LangGraph 编排图 + 节点定义（含 nodes/）
-├── agents/       # 子 Agent 节点实现
+├── agents/       # 子 Agent 节点实现（业务逻辑，不上传，仅空目录占位）
 ├── llm/          # LLM 薄抽象（OpenAI 兼容，可切换 provider）
 ├── memory/       # mem0 记忆集成
 ├── knowledge/    # WeKnora 知识库预留接口
@@ -58,7 +58,7 @@ src/
 # 预留（P7 阶段建）：api/（FastAPI）· web/（Chainlit）· persistence/（Checkpointer）
 ```
 
-> `/docs`、`/data`、`/agents`（业务手册与 SQL）、`/tests`、`AGENTS.md` 涉及公司资产，不在本仓库体现（保留空目录占位）。
+> `/docs`、`/data`、`/agents`（业务手册与 SQL）、`/tests`、`AGENTS.md`、`src/agents/`（子 Agent 业务节点）涉及公司资产，不在本仓库体现（保留空目录占位）。
 
 ---
 
@@ -73,4 +73,4 @@ src/
 
 ## 六、开发进度
 
-技术骨架分阶段搭建：**P0** 配置层 → **P1** 工具层 → **P2** LLM 薄抽象（以上已完成）→ **P3** 子 Agent 节点 → **P4** LangGraph 编排 → **P5** 记忆 / 知识库 → **P6** 端到端 + 评估 → **P7** 界面 / API / 持久化 → **P8** 界面深化 / 多用户。
+技术骨架分阶段搭建：**P0** 配置层 → **P1** 工具层 → **P2** LLM 薄抽象 → **P3** 子 Agent 节点（以上已完成）→ **P4** LangGraph 编排 → **P5** 记忆 / 知识库 → **P6** 端到端 + 评估 → **P7** 界面 / API / 持久化 → **P8** 界面深化 / 多用户。

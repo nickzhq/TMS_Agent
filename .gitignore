@@ -50,3 +50,7 @@ AGENTS.md
 
 # any SQL asset
 *.sql
+
+# src/agents/: local-only sub-agent implementations; keep empty folder
+src/agents/*
+!src/agents/.gitkeep
