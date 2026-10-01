@@ -46,24 +46,31 @@ class OpenAICompatClient(LLMClient):
 
         Injects a JSON-schema system hint, requests JSON mode, then validates with pydantic.
         Works with any OpenAI-compatible endpoint supporting response_format=json_object.
+        The API call AND the pydantic validation are BOTH inside the retry loop: some
+        providers occasionally echo the schema instead of an instance, or emit malformed
+        JSON — retrying draws a fresh sample instead of failing the whole node.
         """
         hint = {
             "role": "system",
             "content": (
-                "Respond with ONLY a JSON object matching this schema:\n"
+                "Return ONLY a JSON object that is a valid INSTANCE of the schema below "
+                "(fill in the actual field values). Do NOT return or echo the schema "
+                "definition itself.\nSchema:\n"
                 + json.dumps(schema.model_json_schema(), ensure_ascii=False)
             ),
         }
-        resp = self._with_retry(
-            lambda: self._client.chat.completions.create(
+
+        def _call_and_validate() -> T:
+            resp = self._client.chat.completions.create(
                 model=self.model,
                 messages=[hint, *messages],
                 response_format={"type": "json_object"},
                 **kwargs,
             )
-        )
-        raw = resp.choices[0].message.content or "{}"
-        return schema.model_validate_json(raw)
+            raw = resp.choices[0].message.content or "{}"
+            return schema.model_validate_json(raw)   # ValidationError -> triggers a retry
+
+        return self._with_retry(_call_and_validate)
 
     def _with_retry(self, fn: Callable[[], Any]) -> Any:
         """Run fn, retrying transient errors with exponential backoff + jitter."""
