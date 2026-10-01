@@ -17,7 +17,7 @@ amap:
   api_key:  ${AMAP_MAPS_API_KEY}
 
 memory:
-  enabled: true                 # mem0: stores user preferences only
+  enabled: false                # mem0 wired but OFF: real add/search needs embedder + vector-store config (deferred to deployment); flip to true once configured
   provider: mem0
 
 knowledge_base:
