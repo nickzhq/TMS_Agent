@@ -17,6 +17,7 @@ class LLMSettings(BaseModel):
     base_url: str = ""
     api_key: str = ""
     model: str = ""
+    embedding_model: str = "text-embedding-v3"   # for the mem0 embedder (OpenAI-compatible embeddings endpoint)
 
 
 class DbSettings(BaseModel):
