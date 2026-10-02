@@ -5,6 +5,7 @@ langgraph>=0.2          # orchestration (graph state machine + interrupt + check
 langchain-core          # LangGraph dependency (State / message base classes)
 openai>=1.0             # bare OpenAI-compatible SDK (switch base_url for any provider)
 mem0ai                  # memory layer (user preferences only)
+qdrant-client           # mem0 vector store: Qdrant local (embedded) mode with on-disk persistence
 pydantic>=2.0           # config models + state validation
 pyyaml                  # config.yaml parsing
 python-dotenv           # env vars (DB connection string / API key, never committed)

@@ -19,12 +19,12 @@
 | 层 | 选型 | 说明 |
 |----|------|------|
 | 编排框架 | **LangGraph** | 确定性状态图 + HITL 中断 + Checkpoint 持久化 |
-| 后端 API | **FastAPI** | 异步（ASGI）+ WebSocket 流式 |
-| 前端 | **Chainlit** | 纯 Python 对话界面（历史会话 + 流式输出）|
+| 前端 / 运行 | **Chainlit** | 纯 Python 对话界面，进程内直跑编排图（历史会话 + 流式 + HITL）|
+| 后端 API（P8 拆出）| **FastAPI** | 多用户 / 对外 REST + WebSocket 时拆出；MVP 由 Chainlit 自带服务承载 |
 | LLM | **OpenAI 兼容接口** | 裸 base_url + 薄抽象，可切换不同 provider |
 | 数据库 | **SQL Server** | pyodbc 直连（只读账户，完整 T-SQL 支持）|
 | 外部地图 | **高德地图 MCP** | 地理编码（maps_geo）|
-| 记忆 | **mem0** | 用户偏好长期记忆 |
+| 记忆 | **mem0** | 用户偏好长期记忆（向量库 Qdrant 本地模式落盘）|
 | 知识库 | **WeKnora** | RAG 检索，预留接口，默认不启用 |
 | 持久化 | **LangGraph Checkpointer** | SQLite（起步）→ PostgreSQL（多用户）|
 
@@ -55,7 +55,7 @@ src/
 ├── sql/          # SQL 加载与参数注入
 └── main.py       # 入口
 
-# 预留（P7 阶段建）：api/（FastAPI）· web/（Chainlit）· persistence/（Checkpointer）
+# P7 新建：web/（Chainlit 进程内直跑图）· persistence/（Checkpointer + 会话元数据）；api/（FastAPI REST/WS）延 P8
 ```
 
 > `/docs`、`/data`、`/agents`（业务手册与 SQL）、`/tests`、`AGENTS.md`、`src/agents/`（子 Agent 业务节点）涉及公司资产，不在本仓库体现（保留空目录占位）。
@@ -73,4 +73,4 @@ src/
 
 ## 六、开发进度
 
-技术骨架分阶段搭建：**P0** 配置层 → **P1** 工具层 → **P2** LLM 薄抽象 → **P3** 子 Agent 节点 → **P4** LangGraph 编排（以上已完成）→ **P5** 记忆 / 知识库 → **P6** 端到端 + 评估 → **P7** 界面 / API / 持久化 → **P8** 界面深化 / 多用户。
+技术骨架分阶段搭建：**P0** 配置层 → **P1** 工具层 → **P2** LLM 薄抽象 → **P3** 子 Agent 节点 → **P4** LangGraph 编排 → **P5** 记忆 / 知识库 → **P6** 端到端 + 评估（以上已完成）→ **P7** 界面 / 持久化（Chainlit 进程内直跑图 + Checkpointer + mem0，进行中）→ **P8** 界面深化 / 多用户（拆 FastAPI + Postgres）。
