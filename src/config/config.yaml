@@ -2,9 +2,14 @@
 # Sensitive values use env vars ${...} (see .env.example); this file is committable (no plaintext secrets)
 
 llm:
-  base_url: ${LLM_BASE_URL}     # OpenAI-compatible endpoint (provider-switchable)
+  base_url: ${LLM_BASE_URL}     # OpenAI-compatible chat endpoint (provider-switchable)
   api_key:  ${LLM_API_KEY}
   model:    ${LLM_MODEL}
+  # mem0 embedder: a SEPARATE OpenAI-compatible endpoint (the chat MaaS endpoint serves no /embeddings).
+  # Empty base_url/api_key fall back to the chat endpoint above.
+  embedding_base_url: ${EMBEDDING_BASE_URL}   # e.g. https://dashscope.aliyuncs.com/compatible-mode/v1
+  embedding_api_key:  ${EMBEDDING_API_KEY}    # separate key (the chat MaaS key 401s on DashScope)
+  embedding_model:    ${EMBEDDING_MODEL}      # e.g. text-embedding-v4; verify via tests/test_p7_embedding
 
 db:                             # pyodbc direct connection (read-only account, credentials via env vars)
   connection_string: ${MSSQL_CONNECTION_STRING}   # preferred: full string (expanded from .env; real value only in .env, never written here)
@@ -17,10 +22,21 @@ amap:
   api_key:  ${AMAP_MAPS_API_KEY}
 
 memory:
-  enabled: false                # mem0 wired but OFF: real add/search needs embedder + vector-store config (deferred to deployment); flip to true once configured
+  enabled: true                 # mem0 ON: embedder + add/search + restart persistence verified (P7-6/7/8); conversation call-sites wired in batch 2 (Chainlit lifecycle)
   provider: mem0
+  vector_store:                 # Qdrant local (embedded) mode, on-disk -> survives restarts
+    provider: qdrant
+    path: data/qdrant           # STABLE in-project dir (NOT /tmp: mem0's default /tmp/qdrant is wiped on every start)
+    on_disk: true
+    collection_name: user_preferences
+    embedding_model_dims: 1024  # MUST equal the embedding model's real output dims (verify via tests/test_p7_embedding)
+  history_db_path: data/mem0_history.db   # mem0 local SQLite history (default ~/.mem0/history.db)
 
 knowledge_base:
   enabled: false                # WeKnora disabled by default (wired but off); set true once deployed
   provider: weknora
   url: ${WEKNORA_URL}
+
+persistence:                    # web layer (P7): stable file paths under data/ (gitignore), NOT /tmp -> survive restarts
+  checkpointer_path: data/langgraph.db    # LangGraph SqliteSaver (-> PostgresSaver for multi-user later)
+  sessions_db_path: data/sessions.db      # session metadata table (left-side history list)

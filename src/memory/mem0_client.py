@@ -21,7 +21,9 @@ class Mem0Memory(Memory):
         self._m.add(content, user_id=user_id, metadata=metadata or {})
 
     def search(self, user_id: str, query: str, top_k: int = 5) -> list[dict]:
-        res = self._m.search(query, user_id=user_id, limit=top_k)
+        # mem0 2.x: search takes top_k + filters (a top-level user_id is rejected);
+        # older builds used limit=/user_id=. Scope by user so preferences don't cross users.
+        res = self._m.search(query, top_k=top_k, filters={"user_id": user_id})
         if isinstance(res, dict):
             return res.get("results", [])
         return list(res)
