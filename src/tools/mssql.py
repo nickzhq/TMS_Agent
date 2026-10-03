@@ -86,8 +86,16 @@ class MssqlClient:
         return sets
 
     def _ensure_conn(self) -> None:
+        # Lazily (re)open. A cached client can outlive its connection: e.g. the web session's
+        # on_chat_end fires on a transient websocket drop and closes the connection, while a
+        # compiled graph still references this client. Reopening on demand keeps a resumed query
+        # from failing on a closed connection (read-only account; the `with` __exit__ still frees it).
         if self._conn is None:
-            raise RuntimeError("enter the `with MssqlClient(...)` context before querying")
+            self._conn = pyodbc.connect(self.connection_string, autocommit=True)
+
+    def is_open(self) -> bool:
+        """True if a connection is currently open (health check for callers that cache the client)."""
+        return self._conn is not None
 
     @staticmethod
     def _fetch_current(cur) -> list[dict]:

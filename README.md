@@ -62,12 +62,27 @@ src/
 
 ---
 
-## 五、运行环境
+## 五、运行环境与启动
+
+**环境准备**
 
 - Python 3.11+
 - ODBC Driver for SQL Server（微软官方驱动）
 - 安装依赖：`pip install -r requirements.txt`
-- 配置：复制 `.env.example` 为 `.env`，填入实际的数据库 / LLM / 地图服务凭据
+- 配置：复制 `.env.example` 为 `.env`，填入实际的数据库 / LLM / 嵌入 / 地图服务凭据，以及 `CHAINLIT_AUTH_SECRET`（启用登录鉴权后必填，用 `chainlit create-secret` 生成）
+
+**启动 Web 界面**（先激活虚拟环境；Chainlit 进程内直跑编排图）
+
+```bash
+# PowerShell: .\.venv\Scripts\Activate.ps1    |    bash/macOS: source .venv/bin/activate
+chainlit run src/web/chainlit_app.py
+```
+
+- 默认监听 http://localhost:8000（自动打开浏览器）；`--port <端口>` 指定端口，`--headless` 不自动开浏览器。
+- 首次进入是登录页：当前为**单用户 mock 鉴权**（占位，P8 接真实 auth），任意用户名 / 密码即可进入。
+- 停止：终端 `Ctrl+C`。
+
+**本地存储**（均在 `data/`、gitignore、重启不丢）：`langgraph.db`（图状态 / 断点续跑）· `sessions.db`（会话元数据 + 消息历史）· `qdrant/`（mem0 长期记忆，单进程独占目录，勿同时开多个实例）。
 
 ---
 

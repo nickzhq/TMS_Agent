@@ -9,6 +9,7 @@ Generic infrastructure (no business logic) -> committed to the repo.
 """
 from __future__ import annotations
 
+import json
 import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
@@ -28,6 +29,18 @@ CREATE TABLE IF NOT EXISTS sessions (
 
 _INSERT = "INSERT INTO sessions (thread_id, user_id, title, created_at, updated_at) VALUES (?,?,?,?,?)"
 _COLS = "thread_id, user_id, title, created_at, updated_at"
+
+# steps: opaque StepDict JSON per (thread, step) — the Chainlit data layer's message history,
+# so a resumed thread can re-render its past conversation.
+_STEPS_SCHEMA = """
+CREATE TABLE IF NOT EXISTS steps (
+    thread_id  TEXT NOT NULL,
+    step_id    TEXT NOT NULL,
+    created_at TEXT,
+    data       TEXT NOT NULL,
+    PRIMARY KEY (thread_id, step_id)
+)
+"""
 
 
 def make_thread_id(user_id: str, session_id: str | None = None) -> str:
@@ -54,7 +67,8 @@ class SessionsDB:
     async def _db(self):
         async with aiosqlite.connect(self.path) as db:
             db.row_factory = aiosqlite.Row
-            await db.execute(_SCHEMA)   # idempotent guard (CREATE TABLE IF NOT EXISTS)
+            await db.execute(_SCHEMA)        # idempotent guard (CREATE TABLE IF NOT EXISTS)
+            await db.execute(_STEPS_SCHEMA)  # steps table (Chainlit data-layer message history)
             yield db
 
     async def init(self) -> None:
@@ -103,5 +117,47 @@ class SessionsDB:
 
     async def delete(self, thread_id: str) -> None:
         async with self._db() as db:
+            await db.execute("DELETE FROM steps WHERE thread_id=?", (thread_id,))   # cascade
             await db.execute("DELETE FROM sessions WHERE thread_id=?", (thread_id,))
+            await db.commit()
+
+    async def upsert_thread(self, thread_id: str, user_id: str, title: str | None = None) -> None:
+        """Create-or-touch a thread by an EXPLICIT thread_id (the Chainlit data layer owns ids)."""
+        now = _now()
+        async with self._db() as db:
+            await db.execute(
+                "INSERT INTO sessions (thread_id, user_id, title, created_at, updated_at) VALUES (?,?,?,?,?) "
+                "ON CONFLICT(thread_id) DO UPDATE SET updated_at=excluded.updated_at, "
+                "title=COALESCE(excluded.title, sessions.title)",
+                (thread_id, user_id, title, now, now),
+            )
+            await db.commit()
+
+    async def upsert_step(self, thread_id: str, step_id: str, data: dict) -> None:
+        """Insert-or-replace one step (opaque StepDict JSON) for a thread."""
+        created = data.get("createdAt") or _now()
+        async with self._db() as db:
+            await db.execute(
+                "INSERT INTO steps (thread_id, step_id, created_at, data) VALUES (?,?,?,?) "
+                "ON CONFLICT(thread_id, step_id) DO UPDATE SET data=excluded.data, created_at=excluded.created_at",
+                (thread_id, step_id, created, json.dumps(data, ensure_ascii=False)),
+            )
+            await db.commit()
+
+    async def list_steps(self, thread_id: str) -> list[dict]:
+        """All steps of a thread (parsed StepDicts), oldest first."""
+        async with self._db() as db:
+            cur = await db.execute("SELECT data FROM steps WHERE thread_id=? ORDER BY created_at ASC", (thread_id,))
+            rows = await cur.fetchall()
+        out = []
+        for r in rows:
+            try:
+                out.append(json.loads(r["data"]))
+            except Exception:
+                continue
+        return out
+
+    async def delete_step(self, step_id: str) -> None:
+        async with self._db() as db:
+            await db.execute("DELETE FROM steps WHERE step_id=?", (step_id,))
             await db.commit()
