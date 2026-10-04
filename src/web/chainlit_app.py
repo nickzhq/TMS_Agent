@@ -22,7 +22,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 import chainlit as cl
 
 from src.config.settings import load_settings
-from src.web.backend_client import BackendWS, login, cache_token, cached_token, latest_token
+from src.web.backend_client import BackendWS, login, cache_token, cached_token, bind_thread_token
 from src.web.hitl import (
     classify_interrupt, parse_mileage, parse_params_edit, candidate_label, fmt_params,
     PARAMS, AMBIGUITY, MILEAGE, FOLLOWUP,
@@ -63,25 +63,27 @@ def _data_layer():
 
 
 def _token() -> str:
-    """The logged-in user's backend JWT. cl.context RAISES when there's no session (lazify proxy),
-    and context-less calls can't resolve the identifier, so fall back to the latest login token
-    (single-user; see backend_client._LATEST_TOKEN)."""
+    """The logged-in user's backend JWT (resolved by uid). Fails CLOSED ('' -> the backend returns
+    401) rather than borrowing another user's token. cl.context RAISES with no session, so guard it."""
     try:
         user = cl.context.user
         if user is not None:
-            tok = (user.metadata or {}).get("token", "") or cached_token(user.identifier)
-            if tok:
-                return tok
+            return (user.metadata or {}).get("token", "") or cached_token(user.identifier)
     except Exception:
         pass
-    return latest_token()
+    return ""
 
 
 async def _open_ws() -> BackendWS | None:
-    """Open this chat's authenticated WS to the backend (thread_id = Chainlit's own). None on failure."""
+    """Open this chat's authenticated WS to the backend (thread_id = Chainlit's own). None on failure.
+
+    Also binds thread_id -> token HERE (the session context is available), so the context-less
+    data-layer thread/step calls can later resolve the right user's token by thread_id."""
     thread_id = getattr(getattr(cl.context, "session", None), "thread_id", None) or "anon"
+    token = _token()
+    bind_thread_token(thread_id, token)
     try:
-        ws = await BackendWS(_SETTINGS.backend.ws_url, thread_id, _token()).__aenter__()
+        ws = await BackendWS(_SETTINGS.backend.ws_url, thread_id, token).__aenter__()
     except Exception as exc:
         logger.warning("backend WS connect failed: %s", type(exc).__name__)
         return None
