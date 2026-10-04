@@ -82,6 +82,35 @@ class PersistenceSettings(BaseModel):
     sessions_db_path: str = "data/sessions.db"      # session metadata table (drives the left-side history list)
 
 
+class ApiSettings(BaseModel):
+    """FastAPI backend server (P8 front/back split): bind address + CORS for the frontend."""
+    host: str = "127.0.0.1"
+    port: int = 8000
+    cors_origins: list[str] = Field(default_factory=lambda: ["*"])   # restrict to the frontend origin in production
+
+
+class AuthSettings(BaseModel):
+    """Real auth (P8): JWT signing + a password-hashed user store (replaces the mock login).
+
+    jwt_secret MUST come from an env var (never committed); generate one with
+    `python -c "import secrets; print(secrets.token_urlsafe(48))"`. user_db_path is SQLite for
+    batch-1 (-> Postgres in a later batch). allow_registration gates the public /auth/register
+    endpoint (default off; create the first account via `python -m src.auth.cli create-user`).
+    Password hashing uses the stdlib (hashlib.pbkdf2_hmac) -> no passlib/bcrypt dependency.
+    """
+    jwt_secret: str = ""
+    jwt_algorithm: str = "HS256"
+    jwt_expire_minutes: int = 720          # 12h
+    user_db_path: str = "data/auth.db"
+    allow_registration: bool = False
+
+
+class BackendSettings(BaseModel):
+    """Where the (Chainlit) frontend reaches the FastAPI backend (P8 front/back split)."""
+    base_url: str = "http://127.0.0.1:8000"
+    ws_url: str = "ws://127.0.0.1:8000"
+
+
 class Settings(BaseModel):
     """Top-level configuration."""
     llm: LLMSettings = Field(default_factory=LLMSettings)
@@ -90,6 +119,9 @@ class Settings(BaseModel):
     memory: MemorySettings = Field(default_factory=MemorySettings)
     knowledge_base: KnowledgeBaseSettings = Field(default_factory=KnowledgeBaseSettings)
     persistence: PersistenceSettings = Field(default_factory=PersistenceSettings)
+    api: ApiSettings = Field(default_factory=ApiSettings)
+    auth: AuthSettings = Field(default_factory=AuthSettings)
+    backend: BackendSettings = Field(default_factory=BackendSettings)
 
 
 _ENV_PATTERN = re.compile(r"\$\{(\w+)\}")
