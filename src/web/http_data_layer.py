@@ -3,10 +3,14 @@
 Replaces the in-process SessionsDataLayer: threads + steps now live in the BACKEND (single source
 of truth). This adapter proxies Chainlit's data-layer calls to the backend over httpx.
 
-TOKEN RESOLUTION (important): Chainlit CACHES the data layer as a SINGLETON, built lazily — often
-during login, before a session context exists — so a token captured in __init__ would be empty. We
-therefore resolve the backend JWT PER CALL (the current context user's metadata token, else the
-login-time cache keyed by identifier; see backend_client.cached_token).
+TOKEN RESOLUTION (multi-user safe): Chainlit's data layer is a shared SINGLETON and its thread/step
+methods run WITHOUT a session context (cl.context raises), so they cannot ask "which user?". We
+resolve the backend JWT by the identifier each method DOES receive:
+  - thread-scoped methods (create_step/get_thread/update/delete) -> the token bound to that
+    thread_id at on_chat_start/resume (backend_client.thread_token)
+  - list_threads -> filters.userId (Chainlit passes the current user's id) -> cached_token(uid)
+There is NO global "latest token" fallback: an unresolved token stays empty and the backend returns
+401 (fail CLOSED) rather than silently borrowing another user's token.
 
 Chainlit types note (P7 pitfall #13): ThreadFilter / PaginatedResponse / PageInfo are pydantic
 (attribute access + construct instances); ThreadDict / StepDict are TypedDicts (plain dicts).
@@ -23,7 +27,7 @@ from chainlit.data.base import BaseDataLayer
 from chainlit.types import Feedback, PageInfo, PaginatedResponse, Pagination, ThreadDict, ThreadFilter
 from chainlit.user import PersistedUser, User
 
-from src.web.backend_client import SessionsREST, cached_token, latest_token
+from src.web.backend_client import SessionsREST, cached_token, thread_token
 
 logger = logging.getLogger("estimate.web.datalayer")
 
@@ -39,19 +43,29 @@ class HttpSessionsDataLayer(BaseDataLayer):
         self.base_url = base_url
         self.user_id = user_id
 
-    def _rest(self) -> SessionsREST:
-        """Build a per-call REST client with the CURRENT user's backend token. The layer is a Chainlit
-        singleton built during login (no session context -> empty token), so the token must NOT be
-        captured in __init__; resolve it here from the context user, else the login-time cache."""
-        identifier, token = self.user_id, ""
+    # ---- token resolution (multi-user safe; see module docstring) ----
+    def _rest(self, token: str) -> SessionsREST:
+        return SessionsREST(self.base_url, token)
+
+    def _token_for_thread(self, thread_id: str) -> str:
+        """The token bound to this thread (set at on_chat_start/resume); else the context user's;
+        else '' (fail closed — never borrow another user's token)."""
+        tok = thread_token(thread_id) if thread_id else ""
+        if tok:
+            return tok
         try:
             user = cl.context.user
             if user is not None:
-                identifier = user.identifier or identifier
-                token = (user.metadata or {}).get("token", "")
+                return (user.metadata or {}).get("token", "") or cached_token(user.identifier)
         except Exception:
-            pass   # no session context (e.g. during login) -> fall back to the cache
-        return SessionsREST(self.base_url, token or cached_token(identifier) or latest_token())
+            pass
+        return ""
+
+    def _token_for_user(self, user_id: Optional[str]) -> str:
+        """The token for an explicit user id (list_threads gets it from filters.userId)."""
+        if user_id:
+            return cached_token(user_id)
+        return self._token_for_thread("")   # fall back to the context user's token
 
     # ---- users ----
     async def create_user(self, user: User) -> Optional[PersistedUser]:
@@ -70,7 +84,7 @@ class HttpSessionsDataLayer(BaseDataLayer):
         if not tid:
             return
         try:
-            await self._rest().add_step(tid, step_dict)
+            await self._rest(self._token_for_thread(tid)).add_step(tid, step_dict)
         except Exception:
             logger.warning("create_step failed thread=%s", str(tid)[:8], exc_info=True)
 
@@ -83,7 +97,7 @@ class HttpSessionsDataLayer(BaseDataLayer):
     # ---- threads ----
     async def get_thread(self, thread_id: str) -> Optional[ThreadDict]:
         try:
-            row = await self._rest().get(thread_id)
+            row = await self._rest(self._token_for_thread(thread_id)).get(thread_id)
         except Exception:
             logger.warning("get_thread failed thread=%s", str(thread_id)[:8], exc_info=True)
             return None
@@ -94,8 +108,9 @@ class HttpSessionsDataLayer(BaseDataLayer):
     async def list_threads(self, pagination: Pagination, filters: ThreadFilter) -> PaginatedResponse[ThreadDict]:
         # filters/pagination are pydantic (attribute access); server.py calls res.to_dict() -> return
         # a PaginatedResponse INSTANCE (with a PageInfo instance), not a dict.
+        uid = getattr(filters, "userId", None)                # Chainlit passes the current user's id
         try:
-            rows = await self._rest().list()
+            rows = await self._rest(self._token_for_user(uid)).list()
         except Exception:
             logger.warning("list_threads failed", exc_info=True)
             rows = []
@@ -109,18 +124,18 @@ class HttpSessionsDataLayer(BaseDataLayer):
                             metadata: Optional[dict] = None, tags: Optional[List[str]] = None) -> None:
         if name is not None:
             try:
-                await self._rest().rename(thread_id, name)
+                await self._rest(self._token_for_thread(thread_id)).rename(thread_id, name)
             except Exception:
                 logger.warning("update_thread rename failed thread=%s", str(thread_id)[:8], exc_info=True)
 
     async def delete_thread(self, thread_id: str) -> None:
         try:
-            await self._rest().delete(thread_id)
+            await self._rest(self._token_for_thread(thread_id)).delete(thread_id)
         except Exception:
             logger.warning("delete_thread failed thread=%s", str(thread_id)[:8], exc_info=True)
 
     async def get_thread_author(self, thread_id: str) -> str:
-        row = await self._rest().get(thread_id)
+        row = await self._rest(self._token_for_thread(thread_id)).get(thread_id)
         return (row or {}).get("user_id") or self.user_id
 
     def _thread_dict(self, row: dict, steps: list) -> ThreadDict:

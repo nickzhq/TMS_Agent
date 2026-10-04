@@ -42,31 +42,38 @@ def login(base_url: str, username: str, password: str, timeout: float = 10.0) ->
 # data_layer.get_user(identifier) on each request, so a token captured at construction would be
 # empty. We stash the backend JWT at login and resolve it per call by identifier. Single-process
 # only — a frontend restart requires re-login (which re-populates this).
+# uid -> backend JWT (keyed by user id, so it is multi-user safe).
 _TOKEN_CACHE: dict[str, str] = {}
-# Single-user fallback: Chainlit's data layer is a cached SINGLETON whose thread/step methods run
-# WITHOUT a session context (cl.context raises), so they cannot resolve WHICH user's token to use
-# (identifier falls back to 'default' -> cache miss -> empty token -> 401). For the single-user
-# internal tool we fall back to the most recent login's JWT. True multi-user needs a per-session
-# token that Chainlit's singleton data layer cannot carry -> deferred to a later P8 batch.
-_LATEST_TOKEN: str = ""
+# thread_id -> backend JWT. Chainlit's data-layer thread/step methods run WITHOUT a session context
+# (cl.context raises) and the data layer is a shared singleton, so they cannot ask "which user?" —
+# they resolve the token by thread_id instead (bound at on_chat_start/resume, where the context IS
+# available). thread_ids are unique per session -> no cross-user leakage. This REPLACES the old
+# global "latest token" fallback, which borrowed the last login's token and leaked across users.
+_THREAD_TOKEN: dict[str, str] = {}
 
 
 def cache_token(identifier: str, token: str) -> None:
     """Stash the backend JWT for a Chainlit user identifier (called at login)."""
-    global _LATEST_TOKEN
     if identifier:
         _TOKEN_CACHE[identifier] = token
-        _LATEST_TOKEN = token or ""
 
 
 def cached_token(identifier: str) -> str:
-    """The stashed backend JWT for an identifier ('' if none)."""
+    """The stashed backend JWT for a user identifier ('' if none)."""
     return _TOKEN_CACHE.get(identifier, "")
 
 
-def latest_token() -> str:
-    """The most recent login's JWT — single-user fallback for context-less data-layer/WS calls."""
-    return _LATEST_TOKEN
+def bind_thread_token(thread_id: str, token: str) -> None:
+    """Bind a thread to its owner's JWT (called at on_chat_start/resume, where the session context
+    IS available), so context-less data-layer calls can resolve it by thread_id later."""
+    if thread_id and token:
+        _THREAD_TOKEN[thread_id] = token
+
+
+def thread_token(thread_id: str) -> str:
+    """The JWT bound to a thread ('' if none -> the caller fails CLOSED with a 401, never borrows
+    another user's token)."""
+    return _THREAD_TOKEN.get(thread_id, "")
 
 
 class BackendWS:
