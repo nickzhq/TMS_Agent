@@ -19,8 +19,8 @@
 | 层 | 选型 | 说明 |
 |----|------|------|
 | 编排框架 | **LangGraph** | 确定性状态图 + HITL 中断 + Checkpoint 持久化 |
-| 前端 / 运行 | **Chainlit** | 纯 Python 对话界面，进程内直跑编排图（历史会话 + 流式 + HITL）|
-| 后端 API（P8 拆出）| **FastAPI** | 多用户 / 对外 REST + WebSocket 时拆出；MVP 由 Chainlit 自带服务承载 |
+| 前端 | **Chainlit** | 纯 Python 对话界面；P8 起降为纯前端，经 WebSocket 调后端（登录 / 历史会话 / 流式 / HITL）|
+| 后端 API | **FastAPI** | P8 批1 已拆出：独立进程跑编排图 + REST（会话）+ WS（流式 / HITL）+ JWT 鉴权 |
 | LLM | **OpenAI 兼容接口** | 裸 base_url + 薄抽象，可切换不同 provider |
 | 数据库 | **SQL Server** | pyodbc 直连（只读账户，完整 T-SQL 支持）|
 | 外部地图 | **高德地图 MCP** | 地理编码（maps_geo）|
@@ -55,7 +55,8 @@ src/
 ├── sql/          # SQL 加载与参数注入
 └── main.py       # 入口
 
-# P7 新建：web/（Chainlit 进程内直跑图）· persistence/（Checkpointer + 会话元数据）；api/（FastAPI REST/WS）延 P8
+# P7 新建：web/（Chainlit 前端）· persistence/（Checkpointer + 会话元数据）
+# P8 批1 新建：api/（FastAPI 后端：跑图 + REST/WS + 鉴权）· auth/（PBKDF2 密码哈希 + JWT）；web/ 降为前端经 WS 调后端
 ```
 
 > `/docs`、`/data`、`/agents`（业务手册与 SQL）、`/tests`、`AGENTS.md`、`src/agents/`（子 Agent 业务节点）涉及公司资产，不在本仓库体现（保留空目录占位）。
@@ -69,23 +70,32 @@ src/
 - Python 3.11+
 - ODBC Driver for SQL Server（微软官方驱动）
 - 安装依赖：`pip install -r requirements.txt`
-- 配置：复制 `.env.example` 为 `.env`，填入实际的数据库 / LLM / 嵌入 / 地图服务凭据，以及 `CHAINLIT_AUTH_SECRET`（启用登录鉴权后必填，用 `chainlit create-secret` 生成）
+- 配置：复制 `.env.example` 为 `.env`，填入实际的数据库 / LLM / 嵌入 / 地图服务凭据，以及两个 JWT 密钥 `CHAINLIT_AUTH_SECRET`（前端会话）+ `AUTH_JWT_SECRET`（后端 API 鉴权）
 
-**启动 Web 界面**（先激活虚拟环境；Chainlit 进程内直跑编排图）
+**启动**（先激活虚拟环境；P8 批1 前后端分离，需分别起后端与前端两个进程）
 
 ```bash
 # PowerShell: .\.venv\Scripts\Activate.ps1    |    bash/macOS: source .venv/bin/activate
-chainlit run src/web/chainlit_app.py
+
+# 1) 建首个登录账户（密码从 stdin 隐藏输入，不进 shell 历史）
+python -m src.auth.cli create-user <用户名>
+
+# 2) 起后端（FastAPI Agent 服务：跑图 + REST/WS + 鉴权，默认 8000）
+uvicorn src.api.app:app --host 127.0.0.1 --port 8000
+
+# 3) 另开一个终端，起前端（Chainlit，用 8001 避开后端的 8000）
+chainlit run src/web/chainlit_app.py --port 8001
 ```
 
-- 默认监听 http://localhost:8000（自动打开浏览器）；`--port <端口>` 指定端口，`--headless` 不自动开浏览器。
-- 首次进入是登录页：当前为**单用户 mock 鉴权**（占位，P8 接真实 auth），任意用户名 / 密码即可进入。
-- 停止：终端 `Ctrl+C`。
+- 浏览器打开 http://localhost:8001，用步骤 1 创建的账户登录（真实 auth，替换了 P7 的 mock 登录）。
+- 前端经 WebSocket 连后端跑图；会话历史 / 恢复走后端 `/sessions` REST。后端健康检查：http://localhost:8000/healthz。
+- 停止：各终端 `Ctrl+C`。
+- 两个终端都要能访问 venv。若提示 `chainlit` / `uvicorn` / `python` 不是可运行的命令 → venv 未激活：先跑上面的 `Activate.ps1`（Windows）/ `source`（macOS/Linux）；或直接用完整路径 `.venv\Scripts\chainlit.exe`（Windows）/ `.venv/bin/chainlit`（macOS/Linux），后端同理换 `uvicorn.exe`。若 `Activate.ps1` 被执行策略拦住，完整路径方式可绕过。
 
-**本地存储**（均在 `data/`、gitignore、重启不丢）：`langgraph.db`（图状态 / 断点续跑）· `sessions.db`（会话元数据 + 消息历史）· `qdrant/`（mem0 长期记忆，单进程独占目录，勿同时开多个实例）。
+**本地存储**（均在 `data/`、gitignore、重启不丢）：`langgraph.db`（图状态 / 断点续跑）· `sessions.db`（会话元数据 + 消息历史 steps）· `auth.db`（用户表，密码仅存 PBKDF2 哈希）· `qdrant/`（mem0 长期记忆，单进程独占目录，勿同时开多个实例）。
 
 ---
 
 ## 六、开发进度
 
-技术骨架分阶段搭建：**P0** 配置层 → **P1** 工具层 → **P2** LLM 薄抽象 → **P3** 子 Agent 节点 → **P4** LangGraph 编排 → **P5** 记忆 / 知识库 → **P6** 端到端 + 评估（以上已完成）→ **P7** 界面 / 持久化（Chainlit 进程内直跑图 + Checkpointer + mem0，进行中）→ **P8** 界面深化 / 多用户（拆 FastAPI + Postgres）。
+技术骨架分阶段搭建：**P0** 配置层 → **P1** 工具层 → **P2** LLM 薄抽象 → **P3** 子 Agent 节点 → **P4** LangGraph 编排 → **P5** 记忆 / 知识库 → **P6** 端到端 + 评估 → **P7** 界面 / 持久化（Chainlit + Checkpointer + mem0）（以上已完成）→ **P8** 深化 / 多用户：**批1 前后端分离 + 真实 auth 已完成**（拆独立 FastAPI 后端 + JWT + Chainlit 降为前端经 WS）；批2 Postgres、批3 健壮性（连接池 / 上下文窗口 / 可观测性 / 限流 / Docker）待做。

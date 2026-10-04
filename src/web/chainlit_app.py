@@ -1,231 +1,205 @@
-"""Chainlit web app (P7 batch-2): runs the LangGraph estimate flow in-process.
+"""Chainlit frontend (P8 front/back split): a thin UI over the FastAPI Agent backend.
 
-Topology: Chainlit directly imports and runs src/graph — no separate
-FastAPI. HITL is bridged in-process (LangGraph interrupt -> Chainlit Ask* -> Command(resume)).
-Graph state lives in the LangGraph SqliteSaver checkpointer (per thread_id); the session
-list in sessions_db. Business logic stays in src/graph + src/agents; this file is glue.
+It no longer runs the graph in-process. Instead it: logs into the backend (real auth, replacing
+the P7 mock), opens ONE authenticated WebSocket per chat, and renders what the backend streams —
+interrupts become Chainlit Ask*/AskAction (parsed back via web/hitl.py), synthesis becomes Markdown
+(web/render.py). The left history sidebar reads the backend's /sessions REST via HttpSessionsDataLayer.
 
-Lifecycle:
-  - app-level (built once, shared): settings / llm / checkpointer / sessions_db / memory / amap.
-    mem0 + checkpointer are shared on purpose — Qdrant local is single-process (one client),
-    and SqliteSaver is keyed by thread_id, so one instance serves all sessions.
-  - session-level (per chat): thread_id + DB connection + compiled graph (DB built lazily on
-    the first message so opening a chat never blocks on the DB).
+The graph state / checkpointer / mem0 / DB all live in the BACKEND now; thread_id is Chainlit's own
+(opaque UUID) and is the shared key across the WS, the checkpointer and the sessions store.
 
-Run: chainlit run src/web/chainlit_app.py
+Run the backend first (uvicorn src.api.app:app), then: chainlit run src/web/chainlit_app.py
 """
 from __future__ import annotations
 
-import asyncio
-import contextlib
 import logging
 import sys
 from pathlib import Path
 
-# Ensure the project root is importable when launched via `chainlit run src/web/chainlit_app.py`
-# (Chainlit puts the target file's dir on sys.path, not the repo root).
+# Ensure the project root is importable when launched via `chainlit run src/web/chainlit_app.py`.
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import chainlit as cl
 
 from src.config.settings import load_settings
-from src.llm.openai_compat import OpenAICompatClient
-from src.tools.mssql import MssqlClient, build_connection_string
-from src.tools.amap import AmapMCPClient
-from src.memory.factory import build_memory
-from src.persistence.checkpointer import async_sqlite_checkpointer
-from src.persistence.sessions_db import SessionsDB, make_thread_id
-from src.graph.build import build_graph, default_config
-from src.web.graph_runner import run_flow
+from src.web.backend_client import BackendWS, login, cache_token, cached_token, latest_token
 from src.web.hitl import (
     classify_interrupt, parse_mileage, parse_params_edit, candidate_label, fmt_params,
     PARAMS, AMBIGUITY, MILEAGE, FOLLOWUP,
 )
 from src.web.render import render_synthesis
-from src.web.chainlit_data_layer import SessionsDataLayer
+from src.web.http_data_layer import HttpSessionsDataLayer
 
-_APP: dict = {}                              # app-level singletons
-_APP_STACK = contextlib.AsyncExitStack()     # holds the async checkpointer (entered at startup)
 logger = logging.getLogger("estimate.web")
+_SETTINGS = load_settings()
+_ASK_TIMEOUT = 1800   # seconds to wait for a HITL reply (looking up mileage on the phone takes a while)
 
 
-def _app_deps() -> dict:
-    """Build app-level singletons once (shared across sessions).
-
-    Built into a local dict and published only after EVERY dep succeeds, so a mid-init
-    failure can never leave _APP partially populated (which would later KeyError on a
-    missing key such as 'amap'). The checkpointer is added in on_app_startup (it is async);
-    mem0 is lazy — see _get_memory() (Qdrant local is single-process, don't open it eagerly).
-    """
-    if _APP:
-        return _APP
-    s = load_settings()
-    built = {
-        "settings": s,
-        "llm": OpenAICompatClient(s.llm),
-        "sessions": SessionsDB(s.persistence.sessions_db_path),
-        "amap": AmapMCPClient(s.amap.api_key) if s.amap.api_key else None,
-    }
-    _APP.update(built)   # publish atomically (only after every dep built OK)
-    return _APP
-
-
-def _get_memory():
-    """Lazily build mem0 (guarded). Qdrant local is single-process; on lock/init failure,
-    degrade to Noop so a memory problem never crashes a chat session."""
-    app = _app_deps()
-    if "memory" not in app:
-        s = app["settings"]
-        try:
-            app["memory"] = build_memory(s.memory, s.llm)
-        except Exception as exc:
-            import logging
-            logging.getLogger("estimate.web").warning(
-                "mem0 init failed (%s); memory disabled this run", type(exc).__name__)
-            from src.memory.base import NoopMemory
-            app["memory"] = NoopMemory()
-    return app["memory"]
-
-
-_BG_TASKS: set = set()
-
-
-def _spawn(coro) -> None:
-    """Run a coroutine as a tracked fire-and-forget task (keeps a ref; done-callback drops it)."""
-    t = asyncio.create_task(coro)
-    _BG_TASKS.add(t)
-    t.add_done_callback(_BG_TASKS.discard)
-
-
-def _recall_note(uid: str) -> str:
-    """Search mem0 for saved preferences -> a short note for the greeting (guarded; '' on any issue)."""
-    try:
-        hits = _get_memory().search(uid, "报价偏好：常发货主、常走线路、进出口方向、常用箱型柜型拖型", top_k=3)
-    except Exception:
-        logger.warning("mem0 recall failed", exc_info=True)
-        return ""
-    facts = [str(h.get("memory", "")).strip() for h in hits if isinstance(h, dict) and h.get("memory")]
-    facts = [f for f in facts if f][:3]
-    logger.info("mem0 recall uid=%s -> %d fact(s)", uid, len(facts))
-    return ("\n\n（我记得你之前的偏好：" + "；".join(facts) + "）") if facts else ""
-
-
-def _learn(uid: str, content: str) -> None:
-    """Extract preferences from the inquiry into mem0 (runs in a worker thread; guarded)."""
-    try:
-        _get_memory().add(uid, content)
-        logger.info("mem0 learned for uid=%s", uid)
-    except Exception:
-        logger.warning("mem0 add failed", exc_info=True)
-
-
-async def _ensure_graph():
-    """Lazily open this session's DB connection + compile the graph (first message only)."""
-    graph = cl.user_session.get("graph")
-    if graph is not None:
-        return graph
-    app = _app_deps()
-    s = app["settings"]
-    stack = contextlib.ExitStack()
-    db = stack.enter_context(MssqlClient(build_connection_string(s.db)))
-    graph = build_graph(app["llm"], db, amap=app["amap"], checkpointer=app["checkpointer"])
-    cl.user_session.set("db_stack", stack)
-    cl.user_session.set("graph", graph)
-    return graph
-
-
-@cl.data_layer
-def _sessions_data_layer():
-    """Factory Chainlit calls (lazily) for the data layer. Registering via the @cl.data_layer
-    decorator is REQUIRED: assigning `cl.data_layer = X` only rebinds the name and is ignored
-    (get_data_layer reads config.code.data_layer, which this decorator sets)."""
-    return SessionsDataLayer(_app_deps()["sessions"])
-
+# ---- auth + data layer ----
 
 @cl.password_auth_callback
 def password_auth_callback(username: str, password: str):
-    """Mock single-user auth (P8: replace with real auth). Chainlit's thread-history endpoint
-    (/project/threads) returns 401 without an authenticated user -> the left history sidebar stays
-    empty. For the local single-user MVP we accept any credentials and map everyone to a fixed
-    'default' user (matches the mock uid='default' design; the data layer keys threads by it)."""
-    return cl.User(identifier="default", display_name="默认用户", metadata={})
+    """Real auth (P8): forward credentials to the backend /auth/login. On success, stash the backend
+    JWT + uid in the Chainlit user's metadata (the WS/REST clients present it). None -> login fails.
+    Chainlit still signs its own session cookie with CHAINLIT_AUTH_SECRET (two tokens, see plan)."""
+    res = login(_SETTINGS.backend.base_url, username, password)
+    if not res:
+        return None
+    # Stash the backend JWT by uid: Chainlit rebuilds the user via data_layer.get_user(identifier) on
+    # later requests (dropping metadata) and caches the data layer as a singleton, so the token must
+    # be resolvable by identifier — not captured once. See backend_client._TOKEN_CACHE.
+    cache_token(res["uid"], res["access_token"])
+    return cl.User(identifier=res["uid"], display_name=res.get("username") or res["uid"],
+                   metadata={"token": res["access_token"]})
 
 
-@cl.on_app_startup
-async def on_app_startup():
-    """Enter the async checkpointer once at server start. The graph runs via ainvoke/astream,
-    which needs the checkpointer's async methods — a sync SqliteSaver raises NotImplementedError."""
-    app = _app_deps()
-    s = app["settings"]
-    app["checkpointer"] = await _APP_STACK.enter_async_context(
-        async_sqlite_checkpointer(s.persistence.checkpointer_path))
-    await app["sessions"].init()
-    logger.info("app startup: async checkpointer + sessions schema ready")
+@cl.data_layer
+def _data_layer():
+    """Chainlit builds the data layer ONCE (a cached singleton), lazily — often during login auth,
+    before any session context exists. So it must NOT capture a token here: HttpSessionsDataLayer
+    resolves the backend token per call (current context user's metadata, else the login-time cache
+    by identifier). create_user/get_user are local no-ops that need no token."""
+    return HttpSessionsDataLayer(_SETTINGS.backend.base_url)
 
 
-@cl.on_app_shutdown
-async def on_app_shutdown():
-    await _APP_STACK.aclose()
+def _token() -> str:
+    """The logged-in user's backend JWT. cl.context RAISES when there's no session (lazify proxy),
+    and context-less calls can't resolve the identifier, so fall back to the latest login token
+    (single-user; see backend_client._LATEST_TOKEN)."""
+    try:
+        user = cl.context.user
+        if user is not None:
+            tok = (user.metadata or {}).get("token", "") or cached_token(user.identifier)
+            if tok:
+                return tok
+    except Exception:
+        pass
+    return latest_token()
 
+
+async def _open_ws() -> BackendWS | None:
+    """Open this chat's authenticated WS to the backend (thread_id = Chainlit's own). None on failure."""
+    thread_id = getattr(getattr(cl.context, "session", None), "thread_id", None) or "anon"
+    try:
+        ws = await BackendWS(_SETTINGS.backend.ws_url, thread_id, _token()).__aenter__()
+    except Exception as exc:
+        logger.warning("backend WS connect failed: %s", type(exc).__name__)
+        return None
+    cl.user_session.set("ws", ws)
+    cl.user_session.set("thread_id", thread_id)
+    return ws
+
+
+# ---- lifecycle ----
 
 @cl.on_chat_start
 async def on_chat_start():
-    _app_deps()
-    # Align the graph thread with Chainlit's thread_id so the data layer (history) and the
-    # checkpointer (state) share one key -> resume works. The thread row is created implicitly
-    # by the data layer on the first persisted step.
-    thread_id = getattr(getattr(cl.context, "session", None), "thread_id", None) or make_thread_id("default")
-    cl.user_session.set("uid", "default")             # single-user MVP; auth placeholder (P8)
-    cl.user_session.set("thread_id", thread_id)
-    cl.user_session.set("config", default_config(thread_id))
-    cl.user_session.set("graph", None)                # built lazily on first message (needs DB)
-    cl.user_session.set("db_stack", None)
     cl.user_session.set("flow_done", False)
-    cl.user_session.set("titled", False)
-    note = _recall_note("default")          # long-term preference recall (mem0); '' if none/disabled
+    ws = await _open_ws()
+    if ws is None:
+        await cl.Message(content="无法连接后端服务，请先启动后端：uvicorn src.api.app:app").send()
+        return
+    note = ""
+    try:
+        greet = await ws.recv()          # backend sends a greeting (mem0 recall note) on connect
+        note = greet.get("text", "") if isinstance(greet, dict) and greet.get("type") == "greeting" else ""
+    except Exception:
+        logger.warning("greeting recv failed", exc_info=True)
     await cl.Message(
         content="你好，我是物流报价助手。请描述一条线路，例如：天津港到汉沽的运费，进口，单拖。" + note
     ).send()
 
 
-_ASK_TIMEOUT = 1800   # seconds to wait for a HITL reply (looking up mileage on the phone takes a while)
+@cl.on_message
+async def on_message(message: cl.Message):
+    ws = cl.user_session.get("ws") or await _open_ws()
+    if ws is None:
+        await cl.Message(content="后端未连接，无法处理。请确认后端已启动后重试。").send()
+        return
+    try:
+        await ws.send_query(message.content or "")
+    except Exception:
+        logger.exception("send_query failed")
+        await cl.Message(content="发送失败：与后端的连接已断开。").send()
+        return
+    await _pump(ws)
 
 
-def _reply_text(res) -> str:
-    """User text from an AskUserMessage.send() result (a StepDict -> 'output'; be defensive)."""
-    if res is None:
-        return ""
-    if isinstance(res, dict):
-        return str(res.get("output") or res.get("content") or "")
-    return str(getattr(res, "content", "") or "")
+@cl.on_chat_resume
+async def on_chat_resume(thread):
+    """Rehydrate a past thread: Chainlit re-renders the stored steps (via the data layer). We open a
+    fresh WS so follow-ups continue this thread's backend state (checkpointer keyed by the same id).
+
+    Known limitation (carried from P7): resuming mid-inquiry re-asks the pending question — the graph
+    state IS checkpointed, so nothing is lost. Seamless mid-flow resume is a later P8 batch."""
+    cl.user_session.set("flow_done", False)
+    ws = await _open_ws()
+    if ws is None:
+        await cl.Message(content="无法连接后端服务。").send()
+        return
+    try:
+        await ws.recv()                  # consume the greeting so the next pump starts clean
+    except Exception:
+        logger.warning("resume greeting recv failed", exc_info=True)
 
 
-def _action_payload(res) -> dict:
-    """Clicked action's payload from an AskActionMessage.send() result (AskActionResponse TypedDict)."""
-    p = res.get("payload") if isinstance(res, dict) else getattr(res, "payload", None)
-    return p if isinstance(p, dict) else {}
+@cl.on_chat_end
+async def on_chat_end():
+    ws = cl.user_session.get("ws")
+    if ws is not None:
+        try:
+            await ws.__aexit__(None, None, None)
+        except Exception:
+            pass
+        cl.user_session.set("ws", None)
 
 
-async def _chainlit_respond(payload, state):
-    """Chainlit HITL responder: render the interrupt, collect input, return a TRUTHY resume value.
+# ---- backend message pump + HITL rendering ----
 
-    Kind dispatch mirrors the graph's interrupt payloads (web/hitl.classify_interrupt).
-    Every branch returns a truthy value — a falsy resume would loop forever.
-    Chainlit 2.12: cl.Action takes payload=<dict> (not value=); AskActionMessage.send() returns
-    an AskActionResponse whose 'payload' is the clicked action's payload; AskUserMessage.send()
-    returns a StepDict whose 'output' is the user's text.
-    """
+async def _pump(ws: BackendWS) -> None:
+    """Receive backend messages until done/error: render synthesis + progress, bridge interrupts."""
+    while True:
+        try:
+            msg = await ws.recv()
+        except Exception as exc:
+            logger.warning("WS recv failed: %s", type(exc).__name__)
+            await cl.Message(content="与后端的连接中断。").send()
+            return
+        t = msg.get("type")
+        if t == "synthesis":
+            await cl.Message(content=render_synthesis(msg.get("data") or {})).send()
+        elif t == "message":
+            txt = msg.get("text", "")
+            if txt:
+                await cl.Message(content=txt).send()
+        elif t == "interrupt":
+            resume_val = await _render_interrupt(msg.get("payload"))
+            try:
+                await ws.send_resume(resume_val)
+            except Exception:
+                logger.exception("send_resume failed")
+                await cl.Message(content="回传失败：与后端的连接已断开。").send()
+                return
+        elif t == "done":
+            cl.user_session.set("flow_done", True)
+            return
+        elif t == "error":
+            await cl.Message(content=f"处理出错：{msg.get('detail', '未知错误')}（详见服务端日志）").send()
+            return
+
+
+async def _render_interrupt(payload) -> object:
+    """Render one interrupt with Chainlit Ask* and return a TRUTHY resume value. Mirrors the old
+    in-process responder, now fed by the backend's payload over WS; parsing stays in web/hitl.py.
+    Every branch returns a truthy value — a falsy resume would loop the graph forever."""
     kind = classify_interrupt(payload)
     ask = payload.get("ask", "") if isinstance(payload, dict) else str(payload)
 
-    if kind == FOLLOWUP:                       # three-price result is ready in state -> render, then ask
-        syn = state.get("synthesis")
-        if syn:
-            await cl.Message(content=render_synthesis(syn)).send()
+    if kind == FOLLOWUP:
         res = await cl.AskUserMessage(content=ask + "\n\n（无后续请回复「结束」）", timeout=_ASK_TIMEOUT).send()
         return _reply_text(res).strip() or "结束"
 
-    if kind == MILEAGE:                        # text template -> parse; retry a few times, else skip
+    if kind == MILEAGE:
         tpl = ("请按格式填写（或回复 skip 用 DB 兜底）：\n"
                "走高速：里程 __ km，桥费 __ 元\n"
                "不走高速：里程 __ km，桥费 __ 元")
@@ -237,7 +211,7 @@ async def _chainlit_respond(payload, state):
             await cl.Message(content="没解析出里程/桥费，请照格式重试（或回复 skip）。").send()
         return "skip"
 
-    if kind == AMBIGUITY:                      # candidate buttons -> return the chosen candidate
+    if kind == AMBIGUITY:
         cands = payload.get("candidates", [])
         actions = [cl.Action(name="pick", label=candidate_label(c), payload={"idx": i})
                    for i, c in enumerate(cands)]
@@ -247,7 +221,7 @@ async def _chainlit_respond(payload, state):
             return cands[idx]
         return cands[0] if cands else "结束"
 
-    if kind == PARAMS:                         # confirm defaults / edit
+    if kind == PARAMS:
         view = (payload.get("params_view") or payload.get("params", {})) if isinstance(payload, dict) else {}
         actions = [cl.Action(name="confirm", label="确认默认值", payload={"choice": "confirm"}),
                    cl.Action(name="modify", label="修改", payload={"choice": "modify"})]
@@ -265,49 +239,16 @@ async def _chainlit_respond(payload, state):
     return _reply_text(res).strip() or "确认"
 
 
-@cl.on_chat_resume
-async def on_chat_resume(thread):
-    """Rehydrate the session when a past thread is opened from the sidebar. Chainlit re-renders
-    the stored steps; we restore the graph thread_id so follow-ups continue this thread's state.
-
-    Known MVP limitation: switching away mid-inquiry (while an Ask* prompt is pending) abandons the
-    in-flight run_flow responder loop. The graph state IS checkpointed, so on return the pending
-    question is simply re-asked (recoverable; no data loss). Seamless mid-flow resume is a P8 item."""
-    _app_deps()
-    thread_id = thread.get("id") if isinstance(thread, dict) else getattr(thread, "id", None)
-    cl.user_session.set("uid", "default")
-    cl.user_session.set("thread_id", thread_id)
-    cl.user_session.set("config", default_config(thread_id))
-    cl.user_session.set("graph", None)
-    cl.user_session.set("db_stack", None)
-    cl.user_session.set("flow_done", False)
-    cl.user_session.set("titled", True)               # already-named past thread
+def _reply_text(res) -> str:
+    """User text from an AskUserMessage.send() result (a StepDict -> 'output'; be defensive)."""
+    if res is None:
+        return ""
+    if isinstance(res, dict):
+        return str(res.get("output") or res.get("content") or "")
+    return str(getattr(res, "content", "") or "")
 
 
-@cl.on_message
-async def on_message(message: cl.Message):
-    app = _app_deps()
-    logger.info("on_message invoked")
-    graph = await _ensure_graph()
-    # First user message of a thread = the inquiry: name the thread (feeds the sidebar) AND fire
-    # preference learning NOW (background). Don't defer it to after run_flow — if the user abandons
-    # the flow mid-followup (e.g. clicks New Chat), run_flow never returns and learning would be skipped.
-    if not cl.user_session.get("titled"):
-        cl.user_session.set("titled", True)
-        query = (message.content or "").strip()
-        await app["sessions"].rename(cl.user_session.get("thread_id"), query.replace("\n", " ")[:24] or "询价")
-        _spawn(asyncio.to_thread(_learn, cl.user_session.get("uid", "default"), f"用户询价：{query}"))
-    config = cl.user_session.get("config")
-    try:
-        await run_flow(graph, config, message.content, _chainlit_respond)
-        cl.user_session.set("flow_done", True)
-    except Exception as exc:
-        logger.exception("on_message failed")   # full traceback -> server log
-        await cl.Message(content=f"处理出错：{type(exc).__name__}（详见服务端日志）").send()  # user sees only the type
-
-
-@cl.on_chat_end
-async def on_chat_end():
-    stack = cl.user_session.get("db_stack")
-    if stack is not None:
-        stack.close()
+def _action_payload(res) -> dict:
+    """Clicked action's payload from an AskActionMessage.send() result (AskActionResponse TypedDict)."""
+    p = res.get("payload") if isinstance(res, dict) else getattr(res, "payload", None)
+    return p if isinstance(p, dict) else {}

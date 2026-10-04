@@ -21,6 +21,10 @@ def main() -> None:
           f"vector_store={vs.provider}@{vs.path} (on_disk={vs.on_disk}, dims={vs.embedding_model_dims})")
     print(f"Knowledge: enabled={settings.knowledge_base.enabled} provider={settings.knowledge_base.provider} (wired, disabled)")
     print(f"Persist  : checkpointer={settings.persistence.checkpointer_path} sessions={settings.persistence.sessions_db_path}")
+    print(f"API      : http://{settings.api.host}:{settings.api.port} (cors={settings.api.cors_origins})")
+    print(f"Auth     : jwt_secret={'configured' if settings.auth.jwt_secret else '<unset>'} "
+          f"user_db={settings.auth.user_db_path} register={settings.auth.allow_registration}")
+    print(f"Backend  : base={settings.backend.base_url} ws={settings.backend.ws_url}")
     print("=== configuration loaded ===")
 
 

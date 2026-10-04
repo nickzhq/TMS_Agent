@@ -40,3 +40,19 @@ knowledge_base:
 persistence:                    # web layer (P7): stable file paths under data/ (gitignore), NOT /tmp -> survive restarts
   checkpointer_path: data/langgraph.db    # LangGraph SqliteSaver (-> PostgresSaver for multi-user later)
   sessions_db_path: data/sessions.db      # session metadata table (left-side history list)
+
+api:                            # FastAPI backend (P8 front/back split): bind address + CORS
+  host: 127.0.0.1
+  port: 8000
+  cors_origins: ["*"]           # restrict to the frontend origin in production
+
+auth:                           # real auth (P8): JWT + password-hashed user store (replaces the mock login)
+  jwt_secret: ${AUTH_JWT_SECRET}   # REQUIRED from env; generate: python -c "import secrets; print(secrets.token_urlsafe(48))"
+  jwt_algorithm: HS256
+  jwt_expire_minutes: 720       # 12h
+  user_db_path: data/auth.db    # SQLite for batch-1 (-> Postgres later)
+  allow_registration: false     # keep off; create users via `python -m src.auth.cli create-user`
+
+backend:                        # where the Chainlit frontend reaches the backend
+  base_url: http://127.0.0.1:8000
+  ws_url: ws://127.0.0.1:8000
