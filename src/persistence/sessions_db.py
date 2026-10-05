@@ -161,3 +161,15 @@ class SessionsDB:
         async with self._db() as db:
             await db.execute("DELETE FROM steps WHERE step_id=?", (step_id,))
             await db.commit()
+
+
+def build_sessions(persistence, pool=None):
+    """Factory: SessionsDB (sqlite) or PostgresSessionsDB (postgres; needs a shared pool), chosen by
+    persistence.provider. Both expose the SAME interface, so callers never branch. Postgres/psycopg
+    is imported lazily -> a sqlite-only environment needs neither installed nor a running Postgres."""
+    if (getattr(persistence, "provider", "sqlite") or "sqlite") == "postgres":
+        from src.persistence.sessions_pg import PostgresSessionsDB
+        if pool is None:
+            raise RuntimeError("persistence.provider=postgres needs a pool (build pg_pool first)")
+        return PostgresSessionsDB(pool)
+    return SessionsDB(persistence.sessions_db_path)

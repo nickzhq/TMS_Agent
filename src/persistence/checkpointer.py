@@ -63,3 +63,14 @@ async def async_sqlite_checkpointer(path: str):
     _ensure_parent(path)
     async with AsyncSqliteSaver.from_conn_string(path) as saver:
         yield saver
+
+
+@asynccontextmanager
+async def async_postgres_checkpointer(pool):
+    """AsyncPostgresSaver over a SHARED psycopg pool (P8 batch-2; the CALLER owns the pool, e.g. via
+    pg_pool). setup() creates the checkpoint tables (idempotent). langgraph-checkpoint-postgres is
+    imported lazily so a sqlite-only environment needs it (and psycopg) not installed."""
+    from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
+    saver = AsyncPostgresSaver(pool)
+    await saver.setup()
+    yield saver

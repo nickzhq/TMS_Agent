@@ -1,0 +1,30 @@
+# P8 batch-2: Postgres + Qdrant server for multi-user persistence.
+# Data persists on the HOST (./data/...), NOT inside the containers -> survives `docker compose down`.
+# Start: docker compose up -d   |   Stop: docker compose down   |   Logs: docker compose logs -f
+# POSTGRES_* come from .env (see .env.example); ./data/ is gitignored. Install Docker yourself.
+services:
+  postgres:
+    image: postgres:16
+    container_name: estimate-postgres
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-estimate}
+      POSTGRES_USER: ${POSTGRES_USER:-estimate}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+    ports:
+      - "5432:5432"
+    volumes:
+      - ./data/postgres:/var/lib/postgresql/data   # host-persisted (NOT in-container)
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-estimate} -d ${POSTGRES_DB:-estimate}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: estimate-qdrant
+    ports:
+      - "6333:6333"   # HTTP (mem0 connects here)
+      - "6334:6334"   # gRPC
+    volumes:
+      - ./data/qdrant-server:/qdrant/storage        # host-persisted (NOT in-container)

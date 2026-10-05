@@ -30,12 +30,15 @@ def _mem0_config(memory_settings: MemorySettings, llm: LLMSettings | None) -> di
             config["embedder"] = {"provider": "openai", "config": emb_cfg}
 
     vs = memory_settings.vector_store
-    config["vector_store"] = {"provider": vs.provider, "config": {
-        "collection_name": vs.collection_name,
-        "embedding_model_dims": vs.embedding_model_dims,
-        "path": vs.path,
-        "on_disk": vs.on_disk,
-    }}
+    # QdrantConfig is STRICT (rejects extra fields): send only the keys the mode needs — server mode
+    # uses host/port (multi-process/multi-user friendly), local (embedded) uses path/on_disk.
+    if vs.mode == "server":
+        vs_cfg = {"collection_name": vs.collection_name, "embedding_model_dims": vs.embedding_model_dims,
+                  "host": vs.host, "port": vs.port}
+    else:
+        vs_cfg = {"collection_name": vs.collection_name, "embedding_model_dims": vs.embedding_model_dims,
+                  "path": vs.path, "on_disk": vs.on_disk}
+    config["vector_store"] = {"provider": vs.provider, "config": vs_cfg}
     if memory_settings.history_db_path:
         config["history_db_path"] = memory_settings.history_db_path
     return config
