@@ -54,7 +54,7 @@ class HttpSessionsDataLayer(BaseDataLayer):
         if tok:
             return tok
         try:
-            user = cl.context.user
+            user = getattr(cl.context.session, "user", None)   # user hangs off the SESSION, not the context
             if user is not None:
                 return (user.metadata or {}).get("token", "") or cached_token(user.identifier)
         except Exception:

@@ -45,17 +45,23 @@ class AmapSettings(BaseModel):
 
 
 class VectorStoreSettings(BaseModel):
-    """mem0 vector store: Qdrant local (embedded) mode with on-disk persistence.
+    """mem0 vector store: Qdrant, in either local (embedded) or server mode.
 
-    `path` MUST be a stable in-project dir (NOT /tmp): mem0's default Qdrant lives in
-    /tmp/qdrant and is wiped/recreated on every start, so memories would not persist.
-    `embedding_model_dims` MUST match the embedding model's real output dims (verify in P7-6).
+    mode="local"  -> embedded, on-disk under `path` (single-process; simple dev). `path` MUST be a
+                     stable in-project dir (NOT /tmp: mem0's default /tmp/qdrant is wiped on every
+                     start, so memories would not persist).
+    mode="server" -> a standalone Qdrant (Docker), reached by host/port; multi-process/multi-user
+                     friendly (embedded mode takes a single-process lock on `path`).
+    `embedding_model_dims` MUST match the embedding model's real output dims.
     """
     provider: str = "qdrant"
-    path: str = "data/qdrant"
-    on_disk: bool = True
+    mode: str = "local"                 # local (embedded, path/on_disk) | server (host/port)
+    path: str = "data/qdrant"           # local mode
+    on_disk: bool = True                # local mode
+    host: str = "localhost"             # server mode
+    port: int = 6333                     # server mode
     collection_name: str = "user_preferences"
-    embedding_model_dims: int = 1024    # placeholder; confirm against the real embeddings dims in P7-6
+    embedding_model_dims: int = 1024
 
 
 class MemorySettings(BaseModel):
@@ -74,12 +80,27 @@ class KnowledgeBaseSettings(BaseModel):
 
 
 class PersistenceSettings(BaseModel):
-    """Web-layer persistence (P7): LangGraph checkpointer + session metadata.
+    """Web-layer persistence: LangGraph checkpointer + session metadata + auth user store.
 
-    Both are stable file paths under data/ (gitignore), NOT /tmp -> survive restarts.
+    provider selects the backend for ALL THREE (P8 batch-2):
+      - "sqlite"   -> files under data/ (gitignore); single-process; default for dev/tests
+      - "postgres" -> a shared Postgres (see PostgresSettings); multi-process/multi-user production
+    The *_path fields are used only in sqlite mode.
     """
-    checkpointer_path: str = "data/langgraph.db"    # LangGraph SqliteSaver file (-> PostgresSaver for multi-user later)
-    sessions_db_path: str = "data/sessions.db"      # session metadata table (drives the left-side history list)
+    provider: str = "sqlite"                        # sqlite | postgres
+    checkpointer_path: str = "data/langgraph.db"    # sqlite mode: LangGraph SqliteSaver file
+    sessions_db_path: str = "data/sessions.db"      # sqlite mode: session metadata table
+
+
+class PostgresSettings(BaseModel):
+    """Postgres connection (P8 batch-2; used when persistence.provider == "postgres").
+
+    dsn comes from env (POSTGRES_DSN), never committed. One shared async pool (psycopg v3) serves
+    the checkpointer + sessions + auth stores. pool_min/pool_max size the pool.
+    """
+    dsn: str = ""                                   # e.g. postgresql://user:pass@localhost:5432/dbname
+    pool_min: int = 1
+    pool_max: int = 20
 
 
 class ApiSettings(BaseModel):
@@ -119,6 +140,7 @@ class Settings(BaseModel):
     memory: MemorySettings = Field(default_factory=MemorySettings)
     knowledge_base: KnowledgeBaseSettings = Field(default_factory=KnowledgeBaseSettings)
     persistence: PersistenceSettings = Field(default_factory=PersistenceSettings)
+    postgres: PostgresSettings = Field(default_factory=PostgresSettings)
     api: ApiSettings = Field(default_factory=ApiSettings)
     auth: AuthSettings = Field(default_factory=AuthSettings)
     backend: BackendSettings = Field(default_factory=BackendSettings)

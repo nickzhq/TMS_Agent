@@ -63,10 +63,12 @@ def _data_layer():
 
 
 def _token() -> str:
-    """The logged-in user's backend JWT (resolved by uid). Fails CLOSED ('' -> the backend returns
-    401) rather than borrowing another user's token. cl.context RAISES with no session, so guard it."""
+    """The logged-in user's backend JWT (resolved by uid). NOTE: the user hangs off the SESSION
+    (cl.context.session.user) — ChainlitContext has NO .user attribute, so cl.context.user raises
+    AttributeError (this was masked by the old latest-token fallback). Fails CLOSED ('' -> the backend
+    returns 401), never borrowing another user's token."""
     try:
-        user = cl.context.user
+        user = getattr(cl.context.session, "user", None)
         if user is not None:
             return (user.metadata or {}).get("token", "") or cached_token(user.identifier)
     except Exception:

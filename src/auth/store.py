@@ -77,3 +77,15 @@ class UserStore:
             cur = await db.execute(f"SELECT {_COLS} FROM users WHERE id=?", (uid,))
             r = await cur.fetchone()
         return dict(r) if r else None
+
+
+def build_user_store(persistence, auth_settings, pool=None):
+    """Factory: UserStore (sqlite) or PostgresUserStore (postgres; needs a shared pool), chosen by
+    persistence.provider (all three stores share ONE provider). Same interface either way; psycopg
+    is imported lazily -> a sqlite-only environment needs neither installed."""
+    if (getattr(persistence, "provider", "sqlite") or "sqlite") == "postgres":
+        from src.auth.store_pg import PostgresUserStore
+        if pool is None:
+            raise RuntimeError("persistence.provider=postgres needs a pool (build pg_pool first)")
+        return PostgresUserStore(pool)
+    return UserStore(auth_settings.user_db_path)
