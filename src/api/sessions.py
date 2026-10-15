@@ -16,6 +16,14 @@ from src.api.deps import get_app, get_current_user, require_thread_owner
 logger = logging.getLogger("estimate.api.sessions")
 router = APIRouter(prefix="/sessions", tags=["sessions"])
 
+# In-process tombstone: thread_ids deleted during this run. Guards against a stale step write
+# (the frontend still flushing history for a just-deleted active chat) silently re-creating the
+# session row via add_step's upsert_thread — which made chats look "undeletable". A deleted chat
+# is gone from the list, so nothing writes to it after this short in-flight window; the set is
+# cleared on restart, which is fine. (For a long-lived multi-worker deploy, replace with a short-TTL
+# store or a soft-delete flag on the sessions row.)
+_DELETED: set[str] = set()
+
 
 class RenameIn(BaseModel):
     title: str
@@ -57,6 +65,7 @@ async def rename_session(thread_id: str, body: RenameIn, uid: str = Depends(get_
 async def delete_session(thread_id: str, uid: str = Depends(get_current_user)) -> dict:
     await require_thread_owner(thread_id, uid)
     await get_app()["sessions"].delete(thread_id)
+    _DELETED.add(thread_id)                            # tombstone: don't let a stale step resurrect it
     return {"ok": True, "thread_id": thread_id}
 
 
@@ -70,6 +79,8 @@ async def add_step(thread_id: str, body: StepIn, uid: str = Depends(get_current_
     if not sid:
         raise HTTPException(status_code=400, detail="step missing id")
     sessions = get_app()["sessions"]
+    if thread_id in _DELETED and await sessions.get(thread_id) is None:
+        return {"ok": True, "thread_id": thread_id, "step_id": sid, "ignored": True}  # deleted -> do not resurrect
     await sessions.upsert_thread(thread_id, uid)     # ensure the thread row exists under this uid
     await sessions.upsert_step(thread_id, sid, step)
     return {"ok": True, "thread_id": thread_id, "step_id": sid}
