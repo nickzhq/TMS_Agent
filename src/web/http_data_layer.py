@@ -27,7 +27,7 @@ from chainlit.data.base import BaseDataLayer
 from chainlit.types import Feedback, PageInfo, PaginatedResponse, Pagination, ThreadDict, ThreadFilter
 from chainlit.user import PersistedUser, User
 
-from src.web.backend_client import SessionsREST, cached_token, thread_token
+from src.web.backend_client import SessionsREST, bind_thread_token, cached_token, thread_token
 
 logger = logging.getLogger("estimate.web.datalayer")
 
@@ -109,11 +109,19 @@ class HttpSessionsDataLayer(BaseDataLayer):
         # filters/pagination are pydantic (attribute access); server.py calls res.to_dict() -> return
         # a PaginatedResponse INSTANCE (with a PageInfo instance), not a dict.
         uid = getattr(filters, "userId", None)                # Chainlit passes the current user's id
+        tok = self._token_for_user(uid)                        # this user's backend JWT
         try:
-            rows = await self._rest(self._token_for_user(uid)).list()
+            rows = await self._rest(tok).list()
         except Exception:
             logger.warning("list_threads failed", exc_info=True)
             rows = []
+        # Chainlit later calls get_thread/delete_thread/update_thread BY thread_id, with NO session
+        # context; _token_for_thread can only resolve a token for a thread that was bound (normally
+        # just the active chat). Bind every listed thread to this user's token here, so deleting or
+        # opening a NON-active chat no longer 401s. Keyed by the authenticated user -> multi-user safe.
+        if tok:
+            for r in rows:
+                bind_thread_token(r["thread_id"], tok)
         search = getattr(filters, "search", None)
         if search:
             rows = [r for r in rows if search.lower() in (r.get("title") or "").lower()]
