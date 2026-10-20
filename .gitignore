@@ -34,7 +34,7 @@ chainlit.md
 # --- Local-only content: docs / data / SQL / manuals managed separately, NOT uploaded ---
 # Only empty directories (via .gitkeep placeholders) are shown in the repo.
 
-# docs/: local-only documents
+# docs/: local-only documents, never uploaded
 docs/*
 !docs/.gitkeep
 
@@ -63,3 +63,7 @@ src/agents/*
 # src/graph/: LangGraph orchestration; keep empty folder
 src/graph/*
 !src/graph/.gitkeep
+
+# Office documents / spreadsheets (local artifacts, never uploaded)
+*.xls
+*.xlsx
