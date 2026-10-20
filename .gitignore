@@ -39,7 +39,7 @@ chainlit.md
 # --- Company assets: business docs / data / SQL / manuals are managed separately, NOT uploaded ---
 # Only empty directories (via .gitkeep placeholders) are shown in the repo.
 
-# docs/: business documents (DB schema, product spec)
+# docs/: business documents (DB schema, product spec) —— 含敏感信息, 全部不入库
 docs/*
 !docs/.gitkeep
 
@@ -68,3 +68,9 @@ src/agents/*
 # src/graph/: LangGraph orchestration (business flow, P4+); keep empty folder
 src/graph/*
 !src/graph/.gitkeep
+
+# --- 月度账单(Bill Agent) 公司财产: 输入样例 / 生成的 Excel / 收费凭证集合, 均不入库 ---
+*.xls
+*.xlsx
+账单_tmp/
+天津优合-*/

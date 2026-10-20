@@ -1,6 +1,6 @@
 # 物流管理报价系统（Logistics Quotation System）
 
-> **资产说明**：`/docs` 和 `/data` 以及其他 SQL 均涉及公司资产，需另外管理，不在此项目中体现。本项目只展示系统技术骨架。
+> **资产说明**：`/docs` 和 `/data` 以及其他 SQL 均涉及公司资产，需另外管理，不在此项目中体现。本项目只展示系统技术骨架。（**月度账单规格 `docs/bill.md` 涉及公司敏感信息——真实表名/口径/数据，同样不入库**）
 >
 > 同理，业务执行手册（`/agents` 下的 SKILL.md / README.md）、`AGENTS.md`、`/tests`、以及 `src/agents/`（子 Agent 业务节点实现）也涉及公司业务口径与数据，不在本仓库体现，仅保留空目录占位。
 
@@ -102,3 +102,18 @@ chainlit run src/web/chainlit_app.py --port 8001
 - 两个终端都要能访问 venv。若提示 `chainlit` / `python` 不是可运行的命令 → venv 未激活：先跑步骤 0 的 `Activate.ps1`（Windows）/ `source`（macOS/Linux）；或直接用完整路径 `.venv\Scripts\chainlit.exe`（Windows）/ `.venv/bin/chainlit`（macOS/Linux），后端换 `.venv\Scripts\python.exe -m src.api.app`。若 `Activate.ps1` 被执行策略拦住，完整路径方式可绕过。
 
 **本地存储**（默认 SQLite，均在 `data/`、gitignore、重启不丢）：`langgraph.db`（图状态 / 断点续跑）· `sessions.db`（会话元数据 + 消息历史）· `auth.db`（用户表，密码仅存 PBKDF2 哈希）· `qdrant/`（mem0 长期记忆）。多用户 / 多进程生产可切 Postgres + Qdrant server（`persistence.provider` 双后端，`.env` 一改即切、无需动代码；起容器 `docker compose up -d`）。
+
+---
+
+## 六、功能模块：估价 Agent 与 月度账单（Bill Agent）
+
+系统规划两类对话能力，**共用同一交互入口**（Chainlit 对话界面 → FastAPI 后端 → LangGraph 编排）：
+
+- **估价 Agent**（事前）：对话式集装箱运价估价——协议价 / 历史成交价 / 理论报价 三价对比。
+- **月度账单 Bill Agent**（事后）：按货主按月出账，产出**三件套**——月度账单 .xls、税率表 .xls、收费凭证集合（每提单一份动态生成的收费清单 + 归集的进项凭证）。
+
+Bill Agent 将作为子流程**编排进现有 LangGraph**（与估价 Agent 同一状态图 / 入口，按意图路由）。样板货主为优合，业务规则以**可替换模板**外置（换货主 = 换配置）。
+
+> 需求、数据口径、字段映射与实现说明详见 **`docs/bill.md`**（本地文档，**涉及公司敏感信息，不入库**）。
+> 注：`docs/bill.md`、账单相关的 Excel 产物、`账单_tmp/`、以及含真实数据的凭证文件夹均属公司财产，已在 `.gitignore` 中排除，不入库。
+> 本仓库**只展示技术骨架**：与估价 Agent 一样，Bill Agent 的业务手册、三件套产物与后续代码整合均属公司内部资产，不在本仓库体现；本节仅说明其定位与接入方式。
