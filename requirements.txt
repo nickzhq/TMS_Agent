@@ -24,6 +24,11 @@ aiosqlite               # async SQLite (FastAPI async)
 httpx                   # frontend -> backend HTTP client (login + sessions REST) (P8)
 pyjwt                   # backend JWT signing/verification for real auth (P8)
 
+# Bill Agent (货主月度账单 / 税率表 / 提单凭证集合; 与估价 Agent 平行, 共用 pyodbc)
+openpyxl                # write .xlsx (bill / tax-rate: freeze_panes, fills, comments, live formulas) - pure Python, no Office launch (avoids WPS flash)
+pymupdf                 # generate 收费清单 PDF (fitz) + render PDF pages to PNG for inspection; also reads JodFiles PDF blobs written to disk
+pywin32                 # Windows-only: Excel COM to dump legacy .xls (prior-month ledger, OLE2) to text; not needed once ledgers are .xlsx
+
 # Notes:
 # - pyodbc requires the system-level ODBC Driver for SQL Server (Microsoft official driver)
 # - SQLite is built into Python (sqlite3); no extra install needed
