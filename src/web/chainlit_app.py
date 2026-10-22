@@ -188,11 +188,19 @@ async def _pump(ws: BackendWS) -> None:
     async def _progress(txt: str) -> None:
         """出账进度：覆盖同一个消息（不刷屏）；出账耗时以分钟计，没有反馈用户会以为卡死。"""
         nonlocal progress_msg
-        if progress_msg is None:
-            progress_msg = cl.Message(content=f"出账中：{txt}")
-            await progress_msg.send()
-        else:
-            await progress_msg.update(content=f"出账中：{txt}")
+        # Chainlit 2.x Message.update() takes NO arguments: assign .content first, then update.
+        # Guard it: a progress-render failure MUST NOT kill the pump, otherwise the bill summary
+        # and the close-confirm interrupt never arrive and the UI sits on the first progress line
+        # forever (this actually happened: update(content=...) raised TypeError on the 2nd update).
+        try:
+            if progress_msg is None:
+                progress_msg = cl.Message(content=f"出账中：{txt}")
+                await progress_msg.send()
+            else:
+                progress_msg.content = f"出账中：{txt}"
+                await progress_msg.update()
+        except Exception:
+            logger.warning("progress render failed", exc_info=True)
 
     while True:
         try:
