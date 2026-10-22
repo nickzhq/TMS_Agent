@@ -25,7 +25,9 @@ from src.config.settings import load_settings
 from src.web.backend_client import BackendWS, login, cache_token, cached_token, bind_thread_token
 from src.web.hitl import (
     classify_interrupt, parse_mileage, parse_params_edit, candidate_label, fmt_params,
-    PARAMS, AMBIGUITY, MILEAGE, FOLLOWUP,
+    parse_bill_period_edit, fmt_bill_view, parse_bill_run_pick, parse_bill_shipper_pick,
+    PARAMS, AMBIGUITY, MILEAGE, FOLLOWUP, BILL_PERIOD, BILL_CLOSE_CONFIRM,
+    BILL_RUN_PICK, BILL_SHIPPER_PICK,
 )
 from src.web.render import render_synthesis
 from src.web.http_data_layer import HttpSessionsDataLayer
@@ -96,6 +98,27 @@ async def _open_ws() -> BackendWS | None:
 
 # ---- lifecycle ----
 
+# Welcome text: it must cover BOTH capabilities (freight quoting + monthly billing),
+# because the backend triage node routes on the whole sentence, not on a fixed menu.
+# Keep it user-facing Chinese with the capability names users actually see
+# (协议价 / 历史成交价 / 理论报价), and avoid internal codes.
+_WELCOME = """你好，我是物流业务助手，能帮你做两件事：**线路报价**和**月度账单**。
+
+**一、线路报价**（协议价 / 历史成交价 / 理论报价 三价对比）
+描述一条线路就行，例如：天津港到汉沽的运费，进口，单拖。
+我会先跟你确认参数（箱型、柜型、拖型、进出口方向、终点搜索半径等），
+再给出三价对照与建议报价区间，并附上历史成交明细。
+其中理论报价那档，需要你在手机高德「货车模式」查双路线里程和桥费给我。
+
+**二、月度账单**
+- **出账**：说清货主和账期，我生成账单 Excel、税率表和提单凭证（耗时较长，中途显示进度）
+- **查账**：查各账期的出账次数、账单总额与封账状态；也能按箱号追溯这个箱子每一期的费用明细
+- **封账**：把某一份账单指定为某个月的应收账单（同一账期有多份时，我会先列出来让你选，绝不默认取最新）
+
+直接用大白话说就行，例如：
+「出 10 月某货主的账单」 / 「查一下某货主的账单账期和封账状态」 / 「查箱号 XXX 的费用轨迹」 / 「把 2026-10 那份账单封成 2026-09 的应收」"""
+
+
 @cl.on_chat_start
 async def on_chat_start():
     cl.user_session.set("flow_done", False)
@@ -109,9 +132,7 @@ async def on_chat_start():
         note = greet.get("text", "") if isinstance(greet, dict) and greet.get("type") == "greeting" else ""
     except Exception:
         logger.warning("greeting recv failed", exc_info=True)
-    await cl.Message(
-        content="你好，我是物流报价助手。请描述一条线路，例如：天津港到汉沽的运费，进口，单拖。" + note
-    ).send()
+    await cl.Message(content=_WELCOME + note).send()
 
 
 @cl.on_message
@@ -162,6 +183,17 @@ async def on_chat_end():
 
 async def _pump(ws: BackendWS) -> None:
     """Receive backend messages until done/error: render synthesis + progress, bridge interrupts."""
+    progress_msg = None
+
+    async def _progress(txt: str) -> None:
+        """出账进度：覆盖同一个消息（不刷屏）；出账耗时以分钟计，没有反馈用户会以为卡死。"""
+        nonlocal progress_msg
+        if progress_msg is None:
+            progress_msg = cl.Message(content=f"出账中：{txt}")
+            await progress_msg.send()
+        else:
+            await progress_msg.update(content=f"出账中：{txt}")
+
     while True:
         try:
             msg = await ws.recv()
@@ -176,6 +208,18 @@ async def _pump(ws: BackendWS) -> None:
             txt = msg.get("text", "")
             if txt:
                 await cl.Message(content=txt).send()
+        elif t == "progress":
+            txt = msg.get("text", "")
+            if txt:
+                await _progress(txt)
+        elif t == "bill":
+            md = (msg.get("data") or {}).get("markdown") or ""
+            if md:
+                await cl.Message(content=md).send()
+        elif t == "bill_close":
+            md = (msg.get("data") or {}).get("markdown") or ""
+            if md:
+                await cl.Message(content=md).send()
         elif t == "interrupt":
             resume_val = await _render_interrupt(msg.get("payload"))
             try:
@@ -238,6 +282,65 @@ async def _render_interrupt(payload) -> object:
             edits = parse_params_edit(_reply_text(m))
             return edits or True               # edited dict, or True if nothing parsed
         return True                            # confirm defaults (TRUTHY — never {})
+
+    if kind == BILL_PERIOD:
+        view = (payload.get("bill_view") or payload.get("bill", {})) if isinstance(payload, dict) else {}
+        actions = [cl.Action(name="confirm", label="确认，出账", payload={"choice": "confirm"}),
+                   cl.Action(name="modify", label="修改", payload={"choice": "modify"})]
+        res = await cl.AskActionMessage(content=ask + "\n\n" + fmt_bill_view(view),
+                                        actions=actions, timeout=_ASK_TIMEOUT).send()
+        if _action_payload(res).get("choice") == "modify":
+            m = await cl.AskUserMessage(
+                content="可修改：账期 / 货主\n（键=值，空格分隔），如：账期=2026-09；或直接说「改成9月」",
+                timeout=_ASK_TIMEOUT).send()
+            edits = parse_bill_period_edit(_reply_text(m))
+            return edits or True           # edited dict, or True if nothing parsed
+        return {"确认": True}               # TRUTHY — never {}
+
+    if kind == BILL_RUN_PICK:
+        runs = payload.get("bill_runs") or []
+        # Key names must match the graph's _run_view() ("账单总额"/"出账编号"), otherwise the
+        # label falls back to the placeholder and the user cannot read the amount or the run id.
+        actions = [cl.Action(name="pick",
+                             label=(f"{i + 1}. {r.get('生成时间', '—')} · {r.get('账单总额', '—')} · "
+                                    f"{r.get('箱数', '—')} 箱 · {r.get('出账编号', '—')}"),
+                             payload={"choice": "pick", "idx": i})
+                   for i, r in enumerate(runs)]
+        res = await cl.AskActionMessage(content=ask, actions=actions, timeout=_ASK_TIMEOUT).send()
+        idx = _action_payload(res).get("idx")
+        if isinstance(idx, int) and 0 <= idx < len(runs):
+            return {"序号": idx + 1}        # TRUTHY
+        return parse_bill_run_pick(_reply_text(res))
+
+    if kind == BILL_SHIPPER_PICK:
+        cands = payload.get("bill_shipper_candidates") or []
+        actions = [cl.Action(name="pick", label=str(c.get("货主") or c.get("货主key") or c),
+                             payload={"choice": "pick", "key": c.get("货主key")})
+                   for c in cands]
+        res = await cl.AskActionMessage(content=ask, actions=actions, timeout=_ASK_TIMEOUT).send()
+        key = _action_payload(res).get("key")
+        if key:
+            return {"货主": str(key)}       # TRUTHY
+        return parse_bill_shipper_pick(_reply_text(res))
+
+    if kind == BILL_CLOSE_CONFIRM:
+        view = (payload.get("bill_close_view") or payload.get("bill_close", {})) if isinstance(payload, dict) else {}
+        actions = [cl.Action(name="close", label="按默认账期封账", payload={"choice": "close"}),
+                   cl.Action(name="other", label="改成别的账期", payload={"choice": "other"}),
+                   cl.Action(name="skip", label="暂不封账", payload={"choice": "skip"})]
+        res = await cl.AskActionMessage(content=ask + "\n\n" + fmt_bill_view(view),
+                                        actions=actions, timeout=_ASK_TIMEOUT).send()
+        choice = _action_payload(res).get("choice")
+        if choice == "skip":
+            return {"不封账": True}         # TRUTHY — never {}
+        if choice == "other":
+            m = await cl.AskUserMessage(content="封到哪个应收账期？（如：9月 / 2026-09）",
+                                        timeout=_ASK_TIMEOUT).send()
+            edits = parse_bill_period_edit(_reply_text(m))
+            if edits.get("账期"):
+                return {"归属账期": edits["账期"]}
+            return {"不封账": True}
+        return {"确认": True}               # TRUTHY — never {}
 
     res = await cl.AskUserMessage(content=ask or "请补充信息", timeout=_ASK_TIMEOUT).send()   # UNKNOWN fallback
     return _reply_text(res).strip() or "确认"

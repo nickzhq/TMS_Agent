@@ -65,3 +65,19 @@ auth:                           # real auth (P8): JWT + password-hashed user sto
 backend:                        # where the Chainlit frontend reaches the backend
   base_url: http://127.0.0.1:8000
   ws_url: ws://127.0.0.1:8000
+
+bill:                           # Bill Agent: monthly invoice output location + asset paths
+  # Output root of a billing package (user/shipper/period three levels). Empty -> default folder on the user's desktop
+  output_root: ${BILL_OUTPUT_ROOT}
+  output_user: ${BILL_OUTPUT_USER}  # empty -> ai_gen (CLI placeholder folder; web passes the login name)
+  run_dir: data/bill_run         # staging dir (written first, then moved as a whole to output_root)
+  templates_dir: ""              # empty -> agents/bill/templates
+  shippers_file: ""              # empty -> agents/bill/shippers.yaml
+  logo_path: ""                 # empty -> agents/bill/assets/logo.png
+  prior_ledger: ""               # empty -> data/_xls_dump.txt (prior-period baseline used by part-3 deduction)
+  build_vouchers: true         # also generate the per-B/L voucher collection (many PDFs; can be turned off)
+  # Billing ledger: every run is recorded and provides the prior-period baseline for part-3 deduction.
+  ledger_db: ${BILL_LEDGER_DB}          # empty -> data/bill_ledger.db (sqlite file, used by the sqlite backend only)
+  ledger_provider: ${BILL_LEDGER_PROVIDER}   # empty -> postgres; sqlite for a local file
+  ledger_dsn: ${BILL_LEDGER_DSN}        # empty -> POSTGRES_DSN env var (postgres backend only)
+  ledger_schema: ${BILL_LEDGER_SCHEMA}  # empty -> bill; postgres schema that isolates the ledger tables

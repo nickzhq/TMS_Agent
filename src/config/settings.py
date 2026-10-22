@@ -132,6 +132,28 @@ class BackendSettings(BaseModel):
     ws_url: str = "ws://127.0.0.1:8000"
 
 
+class BillSettings(BaseModel):
+    """Bill Agent: output location and asset paths for generated billing packages.
+
+    output_root is the root folder of a billing package; products are laid out as
+    {user}/{shipper_short_name}/{YYYYMM} under it. Empty values fall back to the default
+    paths documented in config.yaml and agents/bill/.
+    """
+
+    output_root: str = ""              # billing output root (empty = default desktop folder)
+    output_user: str = "ai_gen"         # user folder under output_root (CLI placeholder; web uses the login name)
+    run_dir: str = "data/bill_run"     # staging dir (written first, then moved as a whole to output_root)
+    templates_dir: str = ""            # template dir (empty = agents/bill/templates)
+    shippers_file: str = ""            # shipper registry (empty = agents/bill/shippers.yaml)
+    logo_path: str = ""                # logo for the charge-list PDF (empty = agents/bill/assets/logo.png)
+    prior_ledger: str = ""             # prior-period baseline file .xlsx/.xls/.txt (empty = data/_xls_dump.txt)
+    build_vouchers: bool = True       # also generate the per-B/L voucher collection (many PDFs; can be turned off)
+    ledger_db: str = ""                 # sqlite ledger DB path (postgres backend ignores it)
+    ledger_provider: str = "postgres"   # ledger backend: postgres | sqlite
+    ledger_dsn: str = ""                  # postgres DSN (empty = POSTGRES_DSN env var)
+    ledger_schema: str = "bill"           # postgres schema holding the ledger tables (isolated from app tables)
+
+
 class Settings(BaseModel):
     """Top-level configuration."""
     llm: LLMSettings = Field(default_factory=LLMSettings)
@@ -144,6 +166,7 @@ class Settings(BaseModel):
     api: ApiSettings = Field(default_factory=ApiSettings)
     auth: AuthSettings = Field(default_factory=AuthSettings)
     backend: BackendSettings = Field(default_factory=BackendSettings)
+    bill: BillSettings = Field(default_factory=BillSettings)
 
 
 _ENV_PATTERN = re.compile(r"\$\{(\w+)\}")

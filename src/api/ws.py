@@ -6,7 +6,7 @@ frontend sends back. The frontend classifies/renders/parses (web/hitl.py) — th
 relays structured payloads. The socket is authenticated via ?token=<JWT> (see ws_uid) and thread_id
 must embed the caller's uid.
 
-Protocol: server->client {greeting,message,synthesis,interrupt,done,error};
+Protocol: server->client {greeting,message,synthesis,interrupt,progress,bill,bill_close,done,error};
 client->server {query,resume,close}. Generic glue -> committed.
 """
 from __future__ import annotations
@@ -23,7 +23,7 @@ from src.api.deps import get_app, get_memory, ws_uid
 from src.graph.build import build_graph, default_config
 from src.tools.mssql import MssqlClient, build_connection_string
 from src.web.graph_runner import run_flow
-from src.web.hitl import classify_interrupt, FOLLOWUP
+from src.web.hitl import classify_interrupt, FOLLOWUP, BILL_CLOSE_CONFIRM
 
 logger = logging.getLogger("estimate.api.ws")
 router = APIRouter()
@@ -59,6 +59,10 @@ class WSResponder:
     def __init__(self, ws: WebSocket):
         self.ws = ws
         self._pending: asyncio.Future | None = None
+        # Dedupe by CONTENT, not by a one-shot flag: the same socket can first push a bill
+        # summary (generation) and later a bill query result. A boolean flag would swallow
+        # the second one (empty page). Same markdown -> skip; different markdown -> push.
+        self.bill_sent_md = ""
 
     async def __call__(self, payload, state):
         # At the followup interrupt the three-price result is ready -> push it for rendering first.
@@ -66,6 +70,9 @@ class WSResponder:
             syn = state.get("synthesis") if isinstance(state, dict) else None
             if syn:
                 await _send(self.ws, {"type": "synthesis", "data": syn})
+        # 封账询问时账单摘要已就绪 -> 先推摘要（用户看到账再决定封不封）
+        if classify_interrupt(payload) == BILL_CLOSE_CONFIRM:
+            await self.push_bill(state)
         await _send(self.ws, {"type": "interrupt", "payload": payload})
         loop = asyncio.get_running_loop()
         self._pending = loop.create_future()
@@ -75,6 +82,17 @@ class WSResponder:
             return "结束"          # a stalled HITL counts as "end" (truthy) so run_flow can finish
         finally:
             self._pending = None
+
+    async def push_bill(self, state) -> bool:
+        """Push the bill markdown (summary or query result); identical content is not repeated."""
+        if not isinstance(state, dict):
+            return False
+        md = state.get("bill_render_md")
+        if not md or md == self.bill_sent_md:
+            return False
+        await _send(self.ws, {"type": "bill", "data": {"markdown": md}})
+        self.bill_sent_md = md
+        return True
 
     def resolve(self, value) -> None:
         """Called by the receive loop when the frontend sends a resume value."""
@@ -106,20 +124,45 @@ def _spawn_learn(uid: str, text: str) -> None:
     t.add_done_callback(_BG.discard)
 
 
-async def _run_flow_task(websocket: WebSocket, graph, config, text: str, responder: WSResponder) -> None:
+async def _pump_progress(ws: WebSocket, queue: asyncio.Queue) -> None:
+    """把出账进度从队列推到前端（每条覆盖上一条，避免刷屏）。
+
+    出账耗时以分钟计（取数 + 上百张凭证），没有进度反馈用户会以为卡死。
+    """
+    while True:
+        text = await queue.get()
+        with contextlib.suppress(Exception):
+            await _send(ws, {"type": "progress", "text": str(text)})
+
+
+async def _run_flow_task(websocket: WebSocket, graph, config, text: str, responder: WSResponder,
+                         progress_queue: asyncio.Queue | None = None) -> None:
     """Run one inquiry to completion; the synthesis + interrupts are pushed by the responder.
 
     run_flow's `emit` progress hook is deliberately NOT wired to the socket: it emits internal
     debug events — the interrupt ask text (the responder already pushes it -> would duplicate) and
     the resume value's TYPE NAME ('dict'/'list'/'bool' -> would show as stray messages). P7's
-    in-process Chainlit also ran run_flow without emit; keep the socket clean the same way."""
+    in-process Chainlit also ran run_flow without emit; keep the socket clean the same way.
+
+    账单域的**业务进度**（出账到了哪一步）走独立的 progress_queue，与上面的 emit 是两回事。"""
+    pump = None
+    if progress_queue is not None:
+        pump = asyncio.create_task(_pump_progress(websocket, progress_queue))
     try:
-        await run_flow(graph, config, text, responder)
+        state = await run_flow(graph, config, text, responder)
+        # 摘要没推过时补推（如账期查询旁路：没有 interrupt，直接结束）
+        await responder.push_bill(state)
+        close_md = (state or {}).get("bill_close_md")
+        if close_md:
+            await _send(websocket, {"type": "bill_close", "data": {"markdown": close_md}})
         await _send(websocket, {"type": "done"})
     except Exception as exc:
         logger.exception("run_flow failed")            # full traceback -> server log
         with contextlib.suppress(Exception):
             await _send(websocket, {"type": "error", "detail": type(exc).__name__})  # user sees only the type
+    finally:
+        if pump is not None:
+            pump.cancel()
 
 
 @router.websocket("/ws/{thread_id}")
@@ -152,13 +195,19 @@ async def ws_inquiry(websocket: WebSocket, thread_id: str):
                     db = db_stack.enter_context(MssqlClient(build_connection_string(s.db)))
                     graph = build_graph(app["llm"], db, amap=app["amap"], checkpointer=app["checkpointer"])
                 text = (msg.get("text") or "").strip()
+                # 账单域的出账进度队列（节点用 call_soon_threadsafe 投递到这里 -> 事件循环线程安全）
+                progress_queue: asyncio.Queue = asyncio.Queue()
+
+                def _sink(msg: str) -> None:
+                    progress_queue.put_nowait(str(msg))
                 row = await app["sessions"].get(thread_id)
                 if not row or not row.get("title"):    # first message -> title the thread + learn prefs
                     await app["sessions"].upsert_thread(thread_id, uid, text.replace("\n", " ")[:24] or "询价")
                     if text:
                         _spawn_learn(uid, text)
-                config = default_config(thread_id)
-                flow_task = asyncio.create_task(_run_flow_task(websocket, graph, config, text, responder))
+                config = default_config(thread_id, bill_progress=_sink, bill_user=uid)
+                flow_task = asyncio.create_task(
+                    _run_flow_task(websocket, graph, config, text, responder, progress_queue))
             elif mtype == "resume":
                 responder.resolve(msg.get("value"))
             elif mtype == "close":
