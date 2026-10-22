@@ -13,6 +13,8 @@ from datetime import datetime, timezone
 
 from psycopg.rows import dict_row
 
+from src.persistence.sessions_db import PLACEHOLDER_TITLE
+
 logger = logging.getLogger("estimate.persistence.sessions_pg")
 
 _DDL = [
@@ -60,8 +62,10 @@ class PostgresSessionsDB:
     async def list(self, user_id: str) -> list[dict]:
         async with self.pool.connection() as conn:
             conn.row_factory = dict_row
+            # Untitled rows are skipped: a chat that never received a message is not a conversation.
             cur = await conn.execute(
-                f"SELECT {_COLS} FROM sessions WHERE user_id=%s ORDER BY updated_at DESC", (user_id,))
+                f"SELECT {_COLS} FROM sessions WHERE user_id=%s "
+                "AND title IS NOT NULL AND title <> '' ORDER BY updated_at DESC", (user_id,))
             return await cur.fetchall()
 
     async def get(self, thread_id: str) -> dict | None:
@@ -78,6 +82,28 @@ class PostgresSessionsDB:
     async def touch(self, thread_id: str) -> None:
         async with self.pool.connection() as conn:
             await conn.execute("UPDATE sessions SET updated_at=%s WHERE thread_id=%s", (_now(), thread_id))
+
+    async def prune_placeholders(self, user_id: str, keep_thread_id: str, keep_recent: int = 2) -> int:
+        """Delete OLD untouched chats (placeholder title), keeping the current one plus the newest few.
+
+        A chat created by merely opening the page carries PLACEHOLDER_TITLE until the first message
+        names it. Keeping all of them clutters the history list; deleting them all breaks any other
+        tab still sitting on one (its next refresh resumes a deleted id). So keep the current chat and
+        the most recent `keep_recent - 1` others, and drop the rest.
+        """
+        async with self.pool.connection() as conn:
+            conn.row_factory = dict_row          # the pool may leave the default tuple factory
+            cur = await conn.execute(
+                "SELECT thread_id FROM sessions WHERE user_id=%s AND title=%s AND thread_id<>%s "
+                "ORDER BY updated_at DESC",
+                (user_id, PLACEHOLDER_TITLE, keep_thread_id),
+            )
+            ids = [row["thread_id"] for row in await cur.fetchall()]
+            drop = ids[max(keep_recent - 1, 0):]
+            for tid in drop:
+                await conn.execute("DELETE FROM steps WHERE thread_id=%s", (tid,))
+                await conn.execute("DELETE FROM sessions WHERE thread_id=%s", (tid,))
+        return len(drop)
 
     async def delete(self, thread_id: str) -> None:
         async with self.pool.connection() as conn:

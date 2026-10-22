@@ -30,6 +30,10 @@ CREATE TABLE IF NOT EXISTS sessions (
 _INSERT = "INSERT INTO sessions (thread_id, user_id, title, created_at, updated_at) VALUES (?,?,?,?,?)"
 _COLS = "thread_id, user_id, title, created_at, updated_at"
 
+# Title given to a chat that exists only because the page was opened; the WS "query" handler renames
+# it with the user's first message. Shared with the Postgres backend so both behave identically.
+PLACEHOLDER_TITLE = "新对话"
+
 # steps: opaque StepDict JSON per (thread, step) — the Chainlit data layer's message history,
 # so a resumed thread can re-render its past conversation.
 _STEPS_SCHEMA = """
@@ -86,10 +90,16 @@ class SessionsDB:
         return thread_id
 
     async def list(self, user_id: str) -> list[dict]:
-        """All sessions for a user, most-recently-updated first (feeds the history list)."""
+        """All sessions for a user, most-recently-updated first (feeds the history list).
+
+        Untitled rows are excluded, but a chat that is currently open carries the placeholder title
+        "新对话" and MUST stay listed — Chainlit redirects a fresh chat to the newest listed thread
+        when the current one is absent.
+        """
         async with self._db() as db:
             cur = await db.execute(
-                f"SELECT {_COLS} FROM sessions WHERE user_id=? ORDER BY updated_at DESC",
+                f"SELECT {_COLS} FROM sessions WHERE user_id=? "
+                "AND (title IS NOT NULL AND title <> '') ORDER BY updated_at DESC",
                 (user_id,),
             )
             rows = await cur.fetchall()
@@ -114,6 +124,28 @@ class SessionsDB:
         async with self._db() as db:
             await db.execute("UPDATE sessions SET updated_at=? WHERE thread_id=?", (_now(), thread_id))
             await db.commit()
+
+    async def prune_placeholders(self, user_id: str, keep_thread_id: str, keep_recent: int = 2) -> int:
+        """Delete OLD untouched chats (placeholder title), keeping the current one plus the newest few.
+
+        A chat created by merely opening the page carries PLACEHOLDER_TITLE until the first message
+        names it. Keeping all of them clutters the history list; deleting them all breaks any other
+        tab still sitting on one (its next refresh resumes a deleted id). So keep the current chat and
+        the most recent `keep_recent - 1` others, and drop the rest.
+        """
+        async with self._db() as db:
+            cur = await db.execute(
+                "SELECT thread_id FROM sessions WHERE user_id=? AND title=? AND thread_id<>? "
+                "ORDER BY updated_at DESC",
+                (user_id, PLACEHOLDER_TITLE, keep_thread_id),
+            )
+            ids = [r["thread_id"] for r in await cur.fetchall()]
+            drop = ids[max(keep_recent - 1, 0):]
+            for tid in drop:
+                await db.execute("DELETE FROM steps WHERE thread_id=?", (tid,))
+                await db.execute("DELETE FROM sessions WHERE thread_id=?", (tid,))
+            await db.commit()
+        return len(drop)
 
     async def delete(self, thread_id: str) -> None:
         async with self._db() as db:
