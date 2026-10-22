@@ -76,6 +76,18 @@ def thread_token(thread_id: str) -> str:
     return _THREAD_TOKEN.get(thread_id, "")
 
 
+def single_cached_token() -> str:
+    """The one cached login token, or '' when there are zero or several.
+
+    Needed by the resume path: Chainlit calls data_layer.get_thread() BEFORE on_chat_resume (where the
+    thread token is bound) and it runs the data layer WITHOUT a session context, so the FIRST open of a
+    thread used to resolve no token at all -> 401 -> silent None -> the UI spun forever. With exactly
+    one logged-in account its token is unambiguous; with several we still fail closed.
+    """
+    tokens = {t for t in _TOKEN_CACHE.values() if t}
+    return next(iter(tokens)) if len(tokens) == 1 else ""
+
+
 class BackendWS:
     """Authenticated WebSocket to the backend for one thread (async context manager).
 
@@ -136,6 +148,16 @@ class SessionsREST:
     async def rename(self, thread_id: str, title: str) -> None:
         async with self._client() as c:
             r = await c.patch(f"/sessions/{thread_id}", json={"title": title})
+            r.raise_for_status()
+
+    async def ensure(self, thread_id: str) -> None:
+        """Create the thread row up-front (idempotent).
+
+        A fresh chat otherwise gets no row until its first message step lands; a refresh inside that
+        window makes Chainlit's resume probe 404 and pop "Couldn't resume chat, threadID not found".
+        """
+        async with self._client() as c:
+            r = await c.post(f"/sessions/{thread_id}/ensure")
             r.raise_for_status()
 
     async def delete(self, thread_id: str) -> None:

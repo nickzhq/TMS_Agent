@@ -22,7 +22,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 import chainlit as cl
 
 from src.config.settings import load_settings
-from src.web.backend_client import BackendWS, login, cache_token, cached_token, bind_thread_token
+from src.web.backend_client import (
+    BackendWS, SessionsREST, bind_thread_token, cache_token, cached_token, login,
+)
 from src.web.hitl import (
     classify_interrupt, parse_mileage, parse_params_edit, candidate_label, fmt_params,
     parse_bill_period_edit, fmt_bill_view, parse_bill_run_pick, parse_bill_shipper_pick,
@@ -96,58 +98,179 @@ async def _open_ws() -> BackendWS | None:
     return ws
 
 
+async def _ensure_thread() -> None:
+    """Create the backend row for this chat immediately (best effort).
+
+    Chainlit resumes from the URL as soon as a chat opens. Without the row a refresh inside the window
+    before the first message step arrives probes 404 and pops "Couldn't resume chat, threadID not
+    found". Failures are non-fatal: add_step will still create the row later.
+    """
+    try:
+        tid = getattr(getattr(cl.context, "session", None), "thread_id", None)
+        token = _token()
+        if tid and token:
+            await SessionsREST(_SETTINGS.backend.base_url, token).ensure(tid)
+    except Exception:
+        logger.warning("ensure thread failed", exc_info=True)
+
+
 # ---- lifecycle ----
 
-# Welcome text: it must cover BOTH capabilities (freight quoting + monthly billing),
-# because the backend triage node routes on the whole sentence, not on a fixed menu.
-# Keep it user-facing Chinese with the capability names users actually see
-# (协议价 / 历史成交价 / 理论报价), and avoid internal codes.
-_WELCOME = """你好，我是物流业务助手，能帮你做两件事：**线路报价**和**月度账单**。
+# ---- welcome / examples ----
+# One single source of truth for the user-facing examples: the welcome table, the clickable
+# Starter buttons and the 「帮助」 reply are all rendered from _EXAMPLES, so they can never drift.
+# (scene, what you can say, what you get)
+_EXAMPLES: list[tuple[str, str, str]] = [
+    ("线路报价", "天津港到汉沽的运费，进口，单拖",
+     "三价对比（协议价 / 历史成交价 / 理论报价）+ 建议报价区间 + 历史成交明细"),
+    ("查账期与封账状态", "查一下账期和封账状态",
+     "各账期的出账次数、账单总额、箱数与封账状态"),
+    ("追一笔费用怎么算的", "查一下箱号 XXXX1234567 的提箱费怎么算的",
+     "逐期逐笔（台账）+ 原始费用行（业务库，能看「3 天 × 1,200.00」这种计算过程）"),
+    ("出账", "出 2026-10 的账单",
+     "先确认账期与货主 → 生成账单三件套（中途显示进度）→ 账单摘要"),
+    ("封账", "把 2026-10 那份账单封成 2026-10 的应收",
+     "同账期有多份时先列候选让你选 → 确认归属期 → 写封账记录"),
+    ("改封账", "把 2026-10 那份改成 2026-09 的应收",
+     "提示受影响账期，并告知下一期基线已指向这份账单"),
+]
 
-**一、线路报价**（协议价 / 历史成交价 / 理论报价 三价对比）
-描述一条线路就行，例如：天津港到汉沽的运费，进口，单拖。
-我会先跟你确认参数（箱型、柜型、拖型、进出口方向、终点搜索半径等），
-再给出三价对照与建议报价区间，并附上历史成交明细。
-其中理论报价那档，需要你在手机高德「货车模式」查双路线里程和桥费给我。
+_WELCOME_HEAD = """你好，我是物流业务助手，能帮你做两件事：**线路报价**和**月度账单**。
+下面每一行都是一句可以直接说的话——**点下面的按钮直接跑**，或挑一句复制发给我、照着自己改。"""
 
-**二、月度账单**
-- **出账**：说清货主和账期，我生成账单 Excel、税率表和提单凭证（耗时较长，中途显示进度）
-- **查账**：查各账期的出账次数、账单总额与封账状态；也能按箱号追溯这个箱子每一期的费用明细
-- **封账**：把某一份账单指定为某个月的应收账单（同一账期有多份时，我会先列出来让你选，绝不默认取最新）
+_WELCOME_TAIL = """> 两点补充：
+> - 报价里的**理论报价**需要你在手机高德「货车模式」查双路线里程与桥费给我（货车路线是收费接口，暂未接入）。
+> - **出账**耗时较长（取数 + 生成上百张凭证），中途会显示进度；**封账**若同账期有多份账单，我会先列候选让你选，绝不默认取最新。
+>
+> 忘了怎么说？直接发「帮助」或「示例」就行。
+>
+> **一个对话办一件事**：报价和账单（出账 / 查账 / 封账）建议分开对话——两者上下文不同，混在一个对话里历史列表会乱；若上一条还没处理完就改说别的，那条会被放弃。"""
 
-直接用大白话说就行，例如：
-「出 10 月某货主的账单」 / 「查一下某货主的账单账期和封账状态」 / 「查箱号 XXX 的费用轨迹」 / 「把 2026-10 那份账单封成 2026-09 的应收」"""
+# NOTE on clickable starters: Chainlit only renders @cl.set_starters while the thread is EMPTY.
+# on_chat_start sends the welcome message immediately, so starters get disabled and unmounted within
+# ~1-3s -> the user can never click them (verified in the browser). Message-level cl.Action buttons
+# have no such limitation, so the clickable examples live ON the welcome message instead.
+#
+# Only the examples that can really run end-to-end are clickable: the billing-generate one would write
+# a ledger row, and the box-trace one needs the user's own box number (XXXX1234567 is a placeholder),
+# so those two stay copy-only to avoid a stray click producing a real invoice or an empty lookup.
+_CLICKABLE = (0, 1)   # indexes into _EXAMPLES: 线路报价 / 查账期
+
+# Short help phrases -> reply locally with the example table (no backend / LLM round-trip).
+_HELP_HINTS = ("帮助", "怎么用", "能做什么", "会做什么", "有什么功能", "有哪些功能",
+               "示例", "例子", "help")
+
+
+def _examples_md() -> str:
+    """Example table (scene | what to say | what you get)."""
+    lines = ["| 我想… | 你可以这样说 | 你会得到 |", "| --- | --- | --- |"]
+    for scene, say, got in _EXAMPLES:
+        lines.append(f"| {scene} | 「{say}」 | {got} |")
+    return "\n".join(lines)
+
+
+def _welcome_md() -> str:
+    return _WELCOME_HEAD + "\n\n" + _examples_md() + "\n\n" + _WELCOME_TAIL
+
+
+def _is_help(text: str) -> bool:
+    """Short sentence + a help word -> answer with the example table (never reaches the graph)."""
+    t = (text or "").strip().lower()
+    return bool(t) and len(t) <= 16 and any(w in t for w in _HELP_HINTS)
+
+
+def _example_actions() -> list:
+    """Clickable example buttons attached to the welcome message (read-only examples only).
+
+    The action NAME doubles as the label on purpose: Chainlit keys action callbacks by name AND uses
+    that name as the initial thread title, so an internal id like "run_example" leaks straight into the
+    history list. A human-readable name fixes the title with no rename round-trip needed.
+    """
+    return [
+        cl.Action(name=_EXAMPLES[i][0], label=_EXAMPLES[i][0],
+                  payload={"message": _EXAMPLES[i][1]})
+        for i in _CLICKABLE
+    ]
 
 
 @cl.on_chat_start
 async def on_chat_start():
     cl.user_session.set("flow_done", False)
+    cl.user_session.set("busy", False)
     ws = await _open_ws()
     if ws is None:
         await cl.Message(content="无法连接后端服务，请先启动后端：uvicorn src.api.app:app").send()
         return
+    await _ensure_thread()
     note = ""
     try:
         greet = await ws.recv()          # backend sends a greeting (mem0 recall note) on connect
         note = greet.get("text", "") if isinstance(greet, dict) and greet.get("type") == "greeting" else ""
     except Exception:
         logger.warning("greeting recv failed", exc_info=True)
-    await cl.Message(content=_WELCOME + note).send()
+    await cl.Message(content=_welcome_md() + note, actions=_example_actions()).send()
 
 
-@cl.on_message
-async def on_message(message: cl.Message):
+async def _retitle_thread(text: str) -> None:
+    """Chainlit names a thread after the clicked Action name ("run_example"); prefer the real sentence."""
+    try:
+        tid = getattr(getattr(cl.context, "session", None), "thread_id", None)
+        if not tid or not text:
+            return
+        await _data_layer().update_thread(tid, name=text.replace("\n", " ")[:24])
+    except Exception:
+        logger.warning("retitle thread failed", exc_info=True)
+
+
+async def _run_query(text: str, echo: str = "") -> None:
+    """Send one sentence to the backend and pump the replies (shared by typing and example buttons)."""
     ws = cl.user_session.get("ws") or await _open_ws()
     if ws is None:
         await cl.Message(content="后端未连接，无法处理。请确认后端已启动后重试。").send()
         return
+    if cl.user_session.get("busy"):
+        await cl.Message(content=(
+            "上一条还没结束：先处理上面的卡片（或回复「结束」放弃它）。"
+            "要办别的事，建议点左上角「新对话」。"
+        )).send()
+        return
+    if echo:
+        await cl.Message(content=echo).send()
+    cl.user_session.set("busy", True)
     try:
-        await ws.send_query(message.content or "")
+        await ws.send_query(text)
+        await _pump(ws)
     except Exception:
         logger.exception("send_query failed")
         await cl.Message(content="发送失败：与后端的连接已断开。").send()
+    finally:
+        cl.user_session.set("busy", False)
+
+
+@cl.on_message
+async def on_message(message: cl.Message):
+    text = (message.content or "").strip()
+    # 「帮助 / 示例」 locally: no backend hop, and it can never be mistaken for a real request
+    if _is_help(text):
+        await cl.Message(content=_welcome_md()).send()
         return
-    await _pump(ws)
+    await _run_query(text)
+
+
+async def on_example_clicked(action: cl.Action):
+    """A clickable example on the welcome message -> behaves exactly like typing that sentence."""
+    text = str((action.payload or {}).get("message") or "").strip()
+    if not text:
+        return
+    await _retitle_thread(text)                       # best effort: persisted row carries the sentence
+    await _run_query(text, echo=f"按示例执行：{text}")
+    await _retitle_thread(text)                       # re-apply in case it was overwritten mid-flow
+
+
+# One registration per example scene name (Chainlit keys action callbacks by action name; the name is
+# also the thread title, so it must stay human-readable).
+for _scene_name in (_EXAMPLES[i][0] for i in _CLICKABLE):
+    cl.action_callback(_scene_name)(on_example_clicked)
 
 
 @cl.on_chat_resume
@@ -158,6 +281,7 @@ async def on_chat_resume(thread):
     Known limitation (carried from P7): resuming mid-inquiry re-asks the pending question — the graph
     state IS checkpointed, so nothing is lost. Seamless mid-flow resume is a later P8 batch."""
     cl.user_session.set("flow_done", False)
+    cl.user_session.set("busy", False)
     ws = await _open_ws()
     if ws is None:
         await cl.Message(content="无法连接后端服务。").send()

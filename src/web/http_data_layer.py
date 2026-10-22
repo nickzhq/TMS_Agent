@@ -27,7 +27,7 @@ from chainlit.data.base import BaseDataLayer
 from chainlit.types import Feedback, PageInfo, PaginatedResponse, Pagination, ThreadDict, ThreadFilter
 from chainlit.user import PersistedUser, User
 
-from src.web.backend_client import SessionsREST, bind_thread_token, cached_token, thread_token
+from src.web.backend_client import SessionsREST, bind_thread_token, cached_token, single_cached_token, thread_token
 
 logger = logging.getLogger("estimate.web.datalayer")
 
@@ -49,7 +49,7 @@ class HttpSessionsDataLayer(BaseDataLayer):
 
     def _token_for_thread(self, thread_id: str) -> str:
         """The token bound to this thread (set at on_chat_start/resume); else the context user's;
-        else '' (fail closed — never borrow another user's token)."""
+        else the single cached login's (see below); else '' (fail closed)."""
         tok = thread_token(thread_id) if thread_id else ""
         if tok:
             return tok
@@ -59,7 +59,11 @@ class HttpSessionsDataLayer(BaseDataLayer):
                 return (user.metadata or {}).get("token", "") or cached_token(user.identifier)
         except Exception:
             pass
-        return ""
+        # Chainlit resolves the thread BEFORE on_chat_resume binds its token, and this layer runs
+        # without a session context -> the first open of any thread resolves '' here. With exactly one
+        # logged-in account the cached token is unambiguous, so use it instead of 401ing into a
+        # silent failure (several users -> still '' -> fail closed).
+        return single_cached_token()
 
     def _token_for_user(self, user_id: Optional[str]) -> str:
         """The token for an explicit user id (list_threads gets it from filters.userId)."""
@@ -100,10 +104,42 @@ class HttpSessionsDataLayer(BaseDataLayer):
             row = await self._rest(self._token_for_thread(thread_id)).get(thread_id)
         except Exception:
             logger.warning("get_thread failed thread=%s", str(thread_id)[:8], exc_info=True)
-            return None
+            # TRANSIENT failure (backend unreachable / 401): degrade to a readable hint so the UI
+            # cannot spin forever.
+            return self._degraded_thread(thread_id)
         if not row:
+            # 404 means the thread really does not exist (e.g. a just-deleted chat, or a brand-new
+            # chat id Chainlit probed). Returning None lets Chainlit treat it as "no thread" and move
+            # on; returning a fake thread here would pin the UI to a non-existent conversation (that
+            # made "New chat" bounce straight back to the previous thread).
             return None
         return self._thread_dict(row, row.get("steps", []))
+
+    def _degraded_thread(self, thread_id: str) -> ThreadDict:
+        """A minimal renderable thread so the UI shows a hint instead of spinning forever.
+
+        Returning None makes Chainlit's resume_thread bail out SILENTLY: the frontend never receives the
+        thread, the spinner never stops and no error is shown anywhere.
+        """
+        now = _now()
+        return {
+            "id": str(thread_id),
+            "createdAt": now,
+            "name": "历史加载失败",
+            "userId": self.user_id,
+            "userIdentifier": self.user_id,
+            "tags": [],
+            "metadata": {},
+            "elements": [],
+            "steps": [{
+                "id": f"degraded-{thread_id}",
+                "name": "加载提示",
+                "type": "assistant_message",
+                "output": ("这条历史对话暂时加载不出来（后台服务可能刚重启或网络中断）。"
+                           "请刷新页面重试；若仍不行，新开一个对话继续。"),
+                "createdAt": now,
+            }],
+        }
 
     async def list_threads(self, pagination: Pagination, filters: ThreadFilter) -> PaginatedResponse[ThreadDict]:
         # filters/pagination are pydantic (attribute access); server.py calls res.to_dict() -> return

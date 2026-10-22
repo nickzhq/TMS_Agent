@@ -97,4 +97,10 @@ def render_synthesis(syn: dict) -> str:
     detail = syn.get("history_detail", [])
     head = f"## 历史成交明细（Top {len(detail)}）" if detail else "## 历史成交明细"
     parts += ["", head, "", _detail_table(detail)]
+    # One conversation = one job. Point to a new chat at the exact moment the quote is done:
+    # mixing a billing request into this thread scatters the history (and, mid-flow, silently drops
+    # the unfinished inquiry).
+    parts += ["", "---",
+              "> 这条线路的报价就到这里。如果接下来要办**账单**（出账 / 查账 / 封账），"
+              "建议点左上角「新对话」再问——报价和账单分开记，历史列表里更好找。"]
     return "\n".join(parts)

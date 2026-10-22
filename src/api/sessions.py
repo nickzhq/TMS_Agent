@@ -12,6 +12,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from src.api.deps import get_app, get_current_user, require_thread_owner
+from src.persistence.sessions_db import PLACEHOLDER_TITLE
 
 logger = logging.getLogger("estimate.api.sessions")
 router = APIRouter(prefix="/sessions", tags=["sessions"])
@@ -81,6 +82,33 @@ async def add_step(thread_id: str, body: StepIn, uid: str = Depends(get_current_
     sessions = get_app()["sessions"]
     if thread_id in _DELETED and await sessions.get(thread_id) is None:
         return {"ok": True, "thread_id": thread_id, "step_id": sid, "ignored": True}  # deleted -> do not resurrect
-    await sessions.upsert_thread(thread_id, uid)     # ensure the thread row exists under this uid
+    # The row must exist BEFORE the first step lands, otherwise the very first messages (the welcome
+    # note, the user's own first message, the "按示例执行" echo) are dropped. It also has to stay VISIBLE
+    # in the history list: Chainlit bounces a fresh chat back to the newest listed thread when the
+    # current one is missing, which looked like "New chat jumped back to the previous conversation".
+    # So: create with a placeholder title (renamed by the WS "query" handler on the first message) and
+    # only touch an existing row — never overwrite a real title with the placeholder.
+    if await sessions.get(thread_id) is None:
+        await sessions.upsert_thread(thread_id, uid, title=PLACEHOLDER_TITLE)
+        # Opening the page repeatedly must not pile up empty "新对话" rows: keep only this one.
+        await sessions.prune_placeholders(uid, keep_thread_id=thread_id)
+    else:
+        await sessions.upsert_thread(thread_id, uid)   # title=None -> COALESCE keeps the real title
     await sessions.upsert_step(thread_id, sid, step)
     return {"ok": True, "thread_id": thread_id, "step_id": sid}
+
+
+@router.post("/{thread_id}/ensure")
+async def ensure_session(thread_id: str, uid: str = Depends(get_current_user)) -> dict:
+    """Create the thread row up-front (idempotent) so a page refresh can always resume it.
+
+    A fresh chat otherwise has no row until its first message step arrives; Chainlit resumes from the
+    URL as soon as the chat opens, so a refresh inside that window probed 404 and popped
+    "Couldn't resume chat, threadID not found".
+    """
+    await require_thread_owner(thread_id, uid)
+    sessions = get_app()["sessions"]
+    if await sessions.get(thread_id) is None:
+        await sessions.upsert_thread(thread_id, uid, title=PLACEHOLDER_TITLE)
+        await sessions.prune_placeholders(uid, keep_thread_id=thread_id)
+    return {"ok": True, "thread_id": thread_id}
