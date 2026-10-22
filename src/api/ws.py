@@ -205,7 +205,14 @@ async def ws_inquiry(websocket: WebSocket, thread_id: str):
                     await app["sessions"].upsert_thread(thread_id, uid, text.replace("\n", " ")[:24] or "询价")
                     if text:
                         _spawn_learn(uid, text)
-                config = default_config(thread_id, bill_progress=_sink, bill_user=uid)
+                # Output folder uses the LOGIN NAME (readable: b32test), not the uid hash
+                # (b4f6bbe8...). The JWT only carries uid, so resolve the username from the user
+                # store; fall back to the uid so a lookup failure never blocks billing.
+                bill_user = uid
+                with contextlib.suppress(Exception):
+                    user_row = await app["users"].get_by_id(uid)
+                    bill_user = (user_row or {}).get("username") or uid
+                config = default_config(thread_id, bill_progress=_sink, bill_user=bill_user)
                 flow_task = asyncio.create_task(
                     _run_flow_task(websocket, graph, config, text, responder, progress_queue))
             elif mtype == "resume":
