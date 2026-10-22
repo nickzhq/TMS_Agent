@@ -13,6 +13,10 @@ PARAMS = "params"        # {"ask", "params": {...}}            -> confirm / edit
 AMBIGUITY = "ambiguity"  # {"ask", "candidates": [...]}         -> pick one candidate
 MILEAGE = "mileage"      # {"ask"(货车模式), "format"}          -> fill 2 routes or skip
 FOLLOWUP = "followup"    # {"ask"(三价对照/加载更多)}            -> free text or end
+BILL_PERIOD = "bill_period"                 # {"ask", "bill": {...}, "bill_view": {...}} -> 确认/修改 账期+货主
+BILL_CLOSE_CONFIRM = "bill_close_confirm"   # {"ask", "bill_close": {...}} -> 封账 / 不封 / 改归属期
+BILL_RUN_PICK = "bill_run_pick"             # {"ask", "bill_runs": [...]} -> 从候选账单里选一份（批3.2）
+BILL_SHIPPER_PICK = "bill_shipper_pick"     # {"ask", "bill_shipper_candidates": [...]} -> 选货主（批3.2）
 UNKNOWN = "unknown"
 
 _NUM = re.compile(r"-?\d+(?:\.\d+)?")
@@ -24,8 +28,17 @@ def classify_interrupt(payload) -> str:
     """Map a graph interrupt payload to a UI kind (order matters)."""
     if not isinstance(payload, dict):
         return UNKNOWN
+    # 批3.2 的两种账单旁路中断必须排在 AMBIGUITY 之前（它们不叫 candidates，但顺序上更明确）
+    if payload.get("bill_runs") is not None:
+        return BILL_RUN_PICK
+    if payload.get("bill_shipper_candidates") is not None:
+        return BILL_SHIPPER_PICK
     if payload.get("candidates"):
         return AMBIGUITY
+    if payload.get("bill_close") is not None:
+        return BILL_CLOSE_CONFIRM
+    if payload.get("bill") is not None:
+        return BILL_PERIOD
     ask = payload.get("ask", "") or ""
     if payload.get("format") or "货车模式" in ask:
         return MILEAGE
@@ -96,3 +109,101 @@ def fmt_params(params: dict) -> str:
     if not isinstance(params, dict) or not params:
         return "（无参数）"
     return "\n".join(f"- {k}：{v}" for k, v in params.items())
+
+
+# ---- 账单域（批3.1）解析器 ----
+
+_PERIOD_KEYS = ("账期", "归属账期", "归属应收账期")
+_SHIPPER_KEYS = ("货主", "货主简称")
+_NEGATIVE = ("不封", "暂不", "先不", "不用封", "算了", "取消")
+
+
+def parse_bill_period_edit(text: str) -> dict:
+    """账单参数确认的修改回传 -> {"账期": "...", "货主": "..."}（可能为空 dict）。
+
+    支持 "账期=2026-09 货主=<货主名>" 与口语 "改成9月"。
+    """
+    out: dict = {}
+    t = (text or "").strip()
+    if not t:
+        return out
+    for k, v in _KV.findall(t):
+        if k in _PERIOD_KEYS:
+            out["账期"] = v
+        elif k in _SHIPPER_KEYS:
+            out["货主"] = v
+    if "账期" not in out:
+        m = re.search(r"(\d{1,2})\s*月", t)
+        if m:
+            out["账期"] = f"{m.group(1)}月"
+    return out
+
+
+def parse_bill_close_answer(text: str) -> dict:
+    """封账询问的回答 -> truthy dict。
+
+    - "不封 / 暂不 / 算了" -> {"不封账": True}
+    - "改成9月 / 归属账期=2026-09" -> {"归属账期": "..."}
+    - "确认 / 封" -> {"确认": True}
+    - 空回复 -> {"不封账": True}（**安全默认**：封账 = 定标准，宁可少做不可错做）
+    """
+    t = (text or "").strip()
+    if not t:
+        return {"不封账": True}
+    if any(w in t for w in _NEGATIVE):
+        return {"不封账": True}
+    edits = parse_bill_period_edit(t)
+    if "账期" in edits:
+        return {"归属账期": edits["账期"]}
+    return {"确认": True}
+
+
+def fmt_bill_view(view: dict) -> str:
+    """账单参数确认提示（键值对 -> 列表行）。"""
+    if not isinstance(view, dict) or not view:
+        return "（无账单参数）"
+    return "\n".join(f"- {k}：{v}" for k, v in view.items())
+
+
+# ---- 账单域旁路（批3.2）解析器 ----
+
+_RE_RUN_ID = re.compile(r"\d{6}[_-][A-Za-z0-9]+[_-]\d{8}[_-]\d{6}")
+_CN_NUM = {"一": 1, "二": 2, "三": 3, "四": 4, "五": 5,
+           "六": 6, "七": 7, "八": 8, "九": 9, "十": 10}
+
+
+def parse_bill_run_pick(text: str) -> dict:
+    """选单回答 -> truthy dict（**绝不默认取最新**）。
+
+    - "第2份 / 2 / 第二份"  -> {"序号": 2}
+    - "最新那份"            -> {"选最新": True}
+    - "最早那份"            -> {"选最旧": True}
+    - 直接给出出账编号      -> {"出账编号": "..."}
+    - 空回复 / "确认"       -> {"确认": True}（**安全默认**：只有一份候选时才算数；
+      多份候选时节点不执行封账——封错一次会一路影响后续账期的扣减基线）
+    """
+    t = (text or "").strip()
+    if not t:
+        return {"确认": True}
+    m = _RE_RUN_ID.search(t)
+    if m:
+        return {"出账编号": m.group(0)}
+    if "最新" in t or "最近" in t:
+        return {"选最新": True}
+    if "最早" in t or "最初" in t:
+        return {"选最旧": True}
+    m = re.search(r"(\d+)\s*(?:个|份|条|版|次)?", t)
+    if m:
+        return {"序号": int(m.group(1))}
+    m = re.search(r"第([一二三四五六七八九十])\s*(?:个|份|条|版)?", t)
+    if m:
+        return {"序号": _CN_NUM.get(m.group(1), 0)}
+    return {"确认": True}
+
+
+def parse_bill_shipper_pick(text: str) -> dict:
+    """选货主 -> {"货主": "..."}（原样回传，节点侧再匹配登记表）。
+
+    空回复 -> {"货主": ""}（非空 dict = truthy；节点匹配不到就不执行）。
+    """
+    return {"货主": (text or "").strip()}
