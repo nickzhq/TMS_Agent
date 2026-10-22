@@ -150,14 +150,14 @@ class SessionsREST:
             r = await c.patch(f"/sessions/{thread_id}", json={"title": title})
             r.raise_for_status()
 
-    async def ensure(self, thread_id: str) -> None:
-        """Create the thread row up-front (idempotent).
+    async def ensure(self, thread_id: str, title: str = "") -> None:
+        """Create the thread row (idempotent) on the FIRST real interaction.
 
-        A fresh chat otherwise gets no row until its first message step lands; a refresh inside that
-        window makes Chainlit's resume probe 404 and pop "Couldn't resume chat, threadID not found".
+        `title` is used only when the row is new (e.g. the first user sentence), so the chat shows
+        up in the history list immediately; an existing title is never overwritten.
         """
         async with self._client() as c:
-            r = await c.post(f"/sessions/{thread_id}/ensure")
+            r = await c.post(f"/sessions/{thread_id}/ensure", json={"title": title})
             r.raise_for_status()
 
     async def delete(self, thread_id: str) -> None:

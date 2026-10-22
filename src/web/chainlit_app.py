@@ -28,6 +28,7 @@ from src.web.backend_client import (
 from src.web.hitl import (
     classify_interrupt, parse_mileage, parse_params_edit, candidate_label, fmt_params,
     parse_bill_period_edit, fmt_bill_view, parse_bill_run_pick, parse_bill_shipper_pick,
+    looks_like_detail_question,
     PARAMS, AMBIGUITY, MILEAGE, FOLLOWUP, BILL_PERIOD, BILL_CLOSE_CONFIRM,
     BILL_RUN_PICK, BILL_SHIPPER_PICK,
 )
@@ -98,20 +99,23 @@ async def _open_ws() -> BackendWS | None:
     return ws
 
 
-async def _ensure_thread() -> None:
-    """Create the backend row for this chat immediately (best effort).
+async def _create_thread_row(text: str) -> None:
+    """Create the backend row on the FIRST real interaction (idempotent; never renames an old row).
 
-    Chainlit resumes from the URL as soon as a chat opens. Without the row a refresh inside the window
-    before the first message step arrives probes 404 and pops "Couldn't resume chat, threadID not
-    found". Failures are non-fatal: add_step will still create the row later.
+    This is the ONLY place a chat row is born — besides the example buttons, which call
+    _retitle_thread. Opening or refreshing a chat writes NOTHING: doing that used to leave a
+    "新对话" entry on every refresh, which users read as "refresh creates a new chat"
+    (reported 2026-10-22). Must run BEFORE any message step is persisted, otherwise Chainlit's
+    step writes race the row creation and get dropped (the assistant reply vanished, observed).
     """
     try:
         tid = getattr(getattr(cl.context, "session", None), "thread_id", None)
         token = _token()
         if tid and token:
-            await SessionsREST(_SETTINGS.backend.base_url, token).ensure(tid)
+            await SessionsREST(_SETTINGS.backend.base_url, token).ensure(
+                tid, title=(text or "")[:24])
     except Exception:
-        logger.warning("ensure thread failed", exc_info=True)
+        logger.warning("create thread row failed", exc_info=True)
 
 
 # ---- lifecycle ----
@@ -124,13 +128,13 @@ _EXAMPLES: list[tuple[str, str, str]] = [
     ("线路报价", "天津港到汉沽的运费，进口，单拖",
      "三价对比（协议价 / 历史成交价 / 理论报价）+ 建议报价区间 + 历史成交明细"),
     ("查账期与封账状态", "查一下账期和封账状态",
-     "各账期的出账次数、账单总额、箱数与封账状态"),
+     "各账期的出账次数、账单总额、箱数与封账状态；说出账期还能看逐份出账记录（含出账编号），照着挑一份封账（首次各 10 条，说「加载更多」继续，每次 20 条）"),
     ("追一笔费用怎么算的", "查一下箱号 XXXX1234567 的提箱费怎么算的",
      "逐期逐笔（台账）+ 原始费用行（业务库，能看「3 天 × 1,200.00」这种计算过程）"),
     ("出账", "出 2026-10 的账单",
      "先确认账期与货主 → 生成账单三件套（中途显示进度）→ 账单摘要"),
     ("封账", "把 2026-10 那份账单封成 2026-10 的应收",
-     "同账期有多份时先列候选让你选 → 确认归属期 → 写封账记录"),
+     "说了「第几份」或出账编号就直接确认那一份，没说清才列候选让你选 → 确认归属期 → 写封账记录"),
     ("改封账", "把 2026-10 那份改成 2026-09 的应收",
      "提示受影响账期，并告知下一期基线已指向这份账单"),
 ]
@@ -201,7 +205,6 @@ async def on_chat_start():
     if ws is None:
         await cl.Message(content="无法连接后端服务，请先启动后端：uvicorn src.api.app:app").send()
         return
-    await _ensure_thread()
     note = ""
     try:
         greet = await ws.recv()          # backend sends a greeting (mem0 recall note) on connect
@@ -212,12 +215,19 @@ async def on_chat_start():
 
 
 async def _retitle_thread(text: str) -> None:
-    """Chainlit names a thread after the clicked Action name ("run_example"); prefer the real sentence."""
+    """Example buttons: make the row (if new) and name it after the real sentence.
+
+    Chainlit names a fresh thread after the clicked Action name, which is why the action names are
+    human-readable scene names in the first place; this keeps the stored title equal to the sentence.
+    """
     try:
         tid = getattr(getattr(cl.context, "session", None), "thread_id", None)
         if not tid or not text:
             return
-        await _data_layer().update_thread(tid, name=text.replace("\n", " ")[:24])
+        title = text.replace("\n", " ")[:24]
+        rest = SessionsREST(_SETTINGS.backend.base_url, _token())
+        await rest.ensure(tid, title=title)     # create if missing (keeps an existing title)
+        await rest.rename(tid, title)           # explicit rename: the action name may be the title
     except Exception:
         logger.warning("retitle thread failed", exc_info=True)
 
@@ -250,6 +260,12 @@ async def _run_query(text: str, echo: str = "") -> None:
 @cl.on_message
 async def on_message(message: cl.Message):
     text = (message.content or "").strip()
+    if not text:
+        return
+    # First real interaction -> create the row (and its title) BEFORE any step is persisted.
+    # Local-only replies ("帮助") need this too: they never reach the backend WS, so without it
+    # the chat would never enter the history list.
+    await _create_thread_row(text)
     # 「帮助 / 示例」 locally: no backend hop, and it can never be mistaken for a real request
     if _is_help(text):
         await cl.Message(content=_welcome_md()).send()
@@ -430,19 +446,14 @@ async def _render_interrupt(payload) -> object:
         return {"确认": True}               # TRUTHY — never {}
 
     if kind == BILL_RUN_PICK:
-        runs = payload.get("bill_runs") or []
-        # Key names must match the graph's _run_view() ("账单总额"/"出账编号"), otherwise the
-        # label falls back to the placeholder and the user cannot read the amount or the run id.
-        actions = [cl.Action(name="pick",
-                             label=(f"{i + 1}. {r.get('生成时间', '—')} · {r.get('账单总额', '—')} · "
-                                    f"{r.get('箱数', '—')} 箱 · {r.get('出账编号', '—')}"),
-                             payload={"choice": "pick", "idx": i})
-                   for i, r in enumerate(runs)]
-        res = await cl.AskActionMessage(content=ask, actions=actions, timeout=_ASK_TIMEOUT).send()
-        idx = _action_payload(res).get("idx")
-        if isinstance(idx, int) and 0 <= idx < len(runs):
-            return {"序号": idx + 1}        # TRUTHY
-        return parse_bill_run_pick(_reply_text(res))
+        # TEXT input instead of buttons: users often cannot pick straight away — they first want to
+        # ask about a candidate ("第 1 份的详情" / "这两份有什么区别"). Buttons forced a 2-way
+        # choice with no way to ask. The node answers the question and then asks again.
+        res = await cl.AskUserMessage(content=ask, timeout=_ASK_TIMEOUT).send()
+        text = _reply_text(res)
+        if looks_like_detail_question(text):
+            return {"追问": text}            # TRUTHY -> node replies with details, then re-asks
+        return parse_bill_run_pick(text)
 
     if kind == BILL_SHIPPER_PICK:
         cands = payload.get("bill_shipper_candidates") or []

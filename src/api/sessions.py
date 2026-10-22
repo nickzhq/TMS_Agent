@@ -34,6 +34,11 @@ class StepIn(BaseModel):
     step: dict
 
 
+class EnsureIn(BaseModel):
+    """Optional title for a brand-new row (the first user sentence). Ignored for existing rows."""
+    title: str | None = None
+
+
 @router.get("")
 async def list_sessions(uid: str = Depends(get_current_user)) -> list[dict]:
     """All sessions of the AUTHENTICATED user, most-recently-updated first (feeds the history list)."""
@@ -82,14 +87,19 @@ async def add_step(thread_id: str, body: StepIn, uid: str = Depends(get_current_
     sessions = get_app()["sessions"]
     if thread_id in _DELETED and await sessions.get(thread_id) is None:
         return {"ok": True, "thread_id": thread_id, "step_id": sid, "ignored": True}  # deleted -> do not resurrect
-    # The row must exist BEFORE the first step lands, otherwise the very first messages (the welcome
-    # note, the user's own first message, the "按示例执行" echo) are dropped. It also has to stay VISIBLE
-    # in the history list: Chainlit bounces a fresh chat back to the newest listed thread when the
-    # current one is missing, which looked like "New chat jumped back to the previous conversation".
-    # So: create with a placeholder title (renamed by the WS "query" handler on the first message) and
-    # only touch an existing row — never overwrite a real title with the placeholder.
+    # A chat row is created ONLY by a real user turn. Opening the page (or refreshing it) makes
+    # Chainlit write the welcome message + the on_chat_start run step immediately; creating a row
+    # for those turned every refresh into a brand-new "新对话" entry in the history list
+    # (user-reported 2026-10-22). Steps that arrive before the first user message are dropped —
+    # the welcome note simply is not persisted, which is the accepted cost of a clean list.
+    # An existing row still receives every step (the full history of a real conversation).
     if await sessions.get(thread_id) is None:
-        await sessions.upsert_thread(thread_id, uid, title=PLACEHOLDER_TITLE)
+        if str(step.get("type") or "") != "user_message":
+            return {"ok": True, "thread_id": thread_id, "step_id": sid, "ignored": True}
+        # Title = the user's first sentence, so the chat is listed the moment it becomes real
+        # (the WS rename stays as a harmless second writer with the same value).
+        raw = " ".join(str(step.get("output") or "").split())
+        await sessions.upsert_thread(thread_id, uid, title=raw[:24] or PLACEHOLDER_TITLE)
         # Opening the page repeatedly must not pile up empty "新对话" rows: keep only this one.
         await sessions.prune_placeholders(uid, keep_thread_id=thread_id)
     else:
@@ -99,16 +109,20 @@ async def add_step(thread_id: str, body: StepIn, uid: str = Depends(get_current_
 
 
 @router.post("/{thread_id}/ensure")
-async def ensure_session(thread_id: str, uid: str = Depends(get_current_user)) -> dict:
-    """Create the thread row up-front (idempotent) so a page refresh can always resume it.
+async def ensure_session(thread_id: str, body: EnsureIn | None = None,
+                         uid: str = Depends(get_current_user)) -> dict:
+    """Create the thread row (idempotent) for the FIRST real interaction.
 
-    A fresh chat otherwise has no row until its first message step arrives; Chainlit resumes from the
-    URL as soon as the chat opens, so a refresh inside that window probed 404 and popped
-    "Couldn't resume chat, threadID not found".
+    Called by the frontend when the user sends the first message (and by the example buttons), so
+    the row — and every step after it — is persisted. Opening/refreshing a chat MUST NOT call this:
+    that used to leave a "新对话" row on every refresh (user-reported 2026-10-22).
+
+    `title` is applied ONLY when the row is new; an existing title is never overwritten here.
     """
     await require_thread_owner(thread_id, uid)
     sessions = get_app()["sessions"]
     if await sessions.get(thread_id) is None:
-        await sessions.upsert_thread(thread_id, uid, title=PLACEHOLDER_TITLE)
+        raw = " ".join(str(body.title if body else "").split())
+        await sessions.upsert_thread(thread_id, uid, title=raw[:24] or PLACEHOLDER_TITLE)
         await sessions.prune_placeholders(uid, keep_thread_id=thread_id)
     return {"ok": True, "thread_id": thread_id}
