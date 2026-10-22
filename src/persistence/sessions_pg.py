@@ -63,9 +63,12 @@ class PostgresSessionsDB:
         async with self.pool.connection() as conn:
             conn.row_factory = dict_row
             # Untitled rows are skipped: a chat that never received a message is not a conversation.
+            # Placeholder rows ("新对话") are skipped too — see SessionsDB.list for the rationale.
+            from src.persistence.sessions_db import PLACEHOLDER_TITLE
             cur = await conn.execute(
                 f"SELECT {_COLS} FROM sessions WHERE user_id=%s "
-                "AND title IS NOT NULL AND title <> '' ORDER BY updated_at DESC", (user_id,))
+                "AND title IS NOT NULL AND title <> '' AND title <> %s ORDER BY updated_at DESC",
+                (user_id, PLACEHOLDER_TITLE))
             return await cur.fetchall()
 
     async def get(self, thread_id: str) -> dict | None:

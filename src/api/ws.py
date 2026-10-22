@@ -59,9 +59,15 @@ class WSResponder:
     def __init__(self, ws: WebSocket):
         self.ws = ws
         self._pending: asyncio.Future | None = None
-        # Dedupe by CONTENT, not by a one-shot flag: the same socket can first push a bill
-        # summary (generation) and later a bill query result. A boolean flag would swallow
-        # the second one (empty page). Same markdown -> skip; different markdown -> push.
+        # Dedupe by CONTENT within ONE run: a single run can push the bill summary at the
+        # close-confirm interrupt and the same markdown again at the end -> push once.
+        # It MUST be reset at the start of every run (begin_run): with a socket-lifetime memo
+        # an identical later reply was swallowed too (ask the same period query twice ->
+        # second reply never rendered; observed 2026-10-22).
+        self.bill_sent_md = ""
+
+    def begin_run(self) -> None:
+        """Reset the per-run push memo (called once in _run_flow_task before run_flow)."""
         self.bill_sent_md = ""
 
     async def __call__(self, payload, state):
@@ -145,6 +151,8 @@ async def _run_flow_task(websocket: WebSocket, graph, config, text: str, respond
     in-process Chainlit also ran run_flow without emit; keep the socket clean the same way.
 
     账单域的**业务进度**（出账到了哪一步）走独立的 progress_queue，与上面的 emit 是两回事。"""
+    # The push memo lives for ONE run only: the same query asked twice must render twice.
+    responder.begin_run()
     pump = None
     if progress_queue is not None:
         pump = asyncio.create_task(_pump_progress(websocket, progress_queue))

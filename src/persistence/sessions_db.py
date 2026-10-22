@@ -92,15 +92,15 @@ class SessionsDB:
     async def list(self, user_id: str) -> list[dict]:
         """All sessions for a user, most-recently-updated first (feeds the history list).
 
-        Untitled rows are excluded, but a chat that is currently open carries the placeholder title
-        "新对话" and MUST stay listed — Chainlit redirects a fresh chat to the newest listed thread
-        when the current one is absent.
+        Untitled rows are excluded, and so are placeholder rows ("新对话"): a history entry must
+        mean "a real conversation". Rows are created only by the first user message now, so this
+        filters legacy leftovers (and the brief moment before the WS renames the row).
         """
         async with self._db() as db:
             cur = await db.execute(
                 f"SELECT {_COLS} FROM sessions WHERE user_id=? "
-                "AND (title IS NOT NULL AND title <> '') ORDER BY updated_at DESC",
-                (user_id,),
+                "AND (title IS NOT NULL AND title <> '' AND title <> ?) ORDER BY updated_at DESC",
+                (user_id, PLACEHOLDER_TITLE),
             )
             rows = await cur.fetchall()
         return [dict(r) for r in rows]
