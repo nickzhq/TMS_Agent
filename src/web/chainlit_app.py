@@ -446,8 +446,8 @@ async def _render_interrupt(payload) -> object:
                                         actions=actions, timeout=_ASK_TIMEOUT).send()
         if _action_payload(res).get("choice") == "modify":
             m = await cl.AskUserMessage(
-                content="可修改：目标月份 / 回看 / 固定成本 / 工资 / 每司机趟数 / 每车趟数 / 备用率\n"
-                        "（键=值，空格分隔），如：目标月份=2026-11 固定成本=260000 工资=300000 每司机趟数=20",
+                content="可修改：目标月份 / 回看（1-36）/ 固定成本 / 工资 / 每司机趟数 / 每车趟数 / 备用率\n"
+                        "（键=值，空格分隔），如：目标月份=2026-11 回看=12 固定成本=260000 每司机趟数=20",
                 timeout=_ASK_TIMEOUT).send()
             edits = parse_forecast_edit(_reply_text(m))
             return edits or True
