@@ -81,3 +81,5 @@ src/bill/*
 *.xlsx
 # Local YYYY-MM artifact folders (generic pattern, no real names)
 *-[0-9][0-9][0-9][0-9]-[0-9][0-9]/
+
+src/profit/*

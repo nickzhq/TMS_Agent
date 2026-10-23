@@ -17,6 +17,7 @@ BILL_PERIOD = "bill_period"                 # {"ask", "bill": {...}, "bill_view"
 BILL_CLOSE_CONFIRM = "bill_close_confirm"   # {"ask", "bill_close": {...}} -> 封账 / 不封 / 改归属期
 BILL_RUN_PICK = "bill_run_pick"             # {"ask", "bill_runs": [...]} -> 从候选账单里选一份（批3.2）
 BILL_SHIPPER_PICK = "bill_shipper_pick"     # {"ask", "bill_shipper_candidates": [...]} -> 选货主（批3.2）
+PROFIT_RANGE = "profit_range"               # {"ask", "profit_view": {...}, "profit": {start,end}} -> 确认/修改月份区间
 UNKNOWN = "unknown"
 
 _NUM = re.compile(r"-?\d+(?:\.\d+)?")
@@ -33,6 +34,8 @@ def classify_interrupt(payload) -> str:
         return BILL_RUN_PICK
     if payload.get("bill_shipper_candidates") is not None:
         return BILL_SHIPPER_PICK
+    if payload.get("profit_view") is not None:
+        return PROFIT_RANGE
     if payload.get("candidates"):
         return AMBIGUITY
     if payload.get("bill_close") is not None:

@@ -30,7 +30,7 @@ from src.web.hitl import (
     parse_bill_period_edit, fmt_bill_view, parse_bill_run_pick, parse_bill_shipper_pick,
     looks_like_detail_question,
     PARAMS, AMBIGUITY, MILEAGE, FOLLOWUP, BILL_PERIOD, BILL_CLOSE_CONFIRM,
-    BILL_RUN_PICK, BILL_SHIPPER_PICK,
+    BILL_RUN_PICK, BILL_SHIPPER_PICK, PROFIT_RANGE,
 )
 from src.web.render import render_synthesis
 from src.web.http_data_layer import HttpSessionsDataLayer
@@ -430,6 +430,21 @@ async def _render_interrupt(payload) -> object:
             edits = parse_params_edit(_reply_text(m))
             return edits or True               # edited dict, or True if nothing parsed
         return True                            # confirm defaults (TRUTHY — never {})
+
+    if kind == PROFIT_RANGE:
+        view = payload.get("profit_view") or {} if isinstance(payload, dict) else {}
+        detail = "\n".join(f"- {k}：{v}" for k, v in view.items()) if isinstance(view, dict) else ""
+        actions = [cl.Action(name="confirm", label="确认，生成", payload={"choice": "confirm"}),
+                   cl.Action(name="modify", label="修改区间", payload={"choice": "modify"})]
+        res = await cl.AskActionMessage(content=ask + "\n\n" + detail,
+                                        actions=actions, timeout=_ASK_TIMEOUT).send()
+        if _action_payload(res).get("choice") == "modify":
+            m = await cl.AskUserMessage(
+                content="请输入月份区间（如 2024-01到2026-09；单月如 2026-01）",
+                timeout=_ASK_TIMEOUT).send()
+            text = _reply_text(m).strip()
+            return {"区间": text} if text else True     # TRUTHY
+        return {"确认": True}
 
     if kind == BILL_PERIOD:
         view = (payload.get("bill_view") or payload.get("bill", {})) if isinstance(payload, dict) else {}
