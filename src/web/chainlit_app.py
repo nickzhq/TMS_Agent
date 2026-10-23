@@ -12,6 +12,7 @@ Run the backend first (uvicorn src.api.app:app), then: chainlit run src/web/chai
 """
 from __future__ import annotations
 
+import base64
 import logging
 import sys
 from pathlib import Path
@@ -255,10 +256,17 @@ async def _run_query(text: str, echo: str = "") -> None:
     cl.user_session.set("busy", True)
     try:
         await ws.send_query(text)
-        await _pump(ws)
     except Exception:
         logger.exception("send_query failed")
+        cl.user_session.set("busy", False)
         await cl.Message(content="发送失败：与后端的连接已断开。").send()
+        return
+    try:
+        await _pump(ws)
+    except Exception:
+        # 渲染/处理阶段出错（如历史图表元素），不要误报成「连接断开」
+        logger.exception("pump failed")
+        await cl.Message(content="处理失败：渲染结果时出错（详见日志）。").send()
     finally:
         cl.user_session.set("busy", False)
 
@@ -374,6 +382,16 @@ async def _pump(ws: BackendWS) -> None:
             md = (msg.get("data") or {}).get("markdown") or ""
             if md:
                 await cl.Message(content=md).send()
+        elif t == "chart":
+            d = msg.get("data") or {}
+            title = d.get("title") or "趋势图"
+            b64 = d.get("b64") or ""
+            if b64:
+                # 后端直接传 base64（不落盘）：作为 Message 的 elements 发送
+                img = cl.Image(content=base64.b64decode(b64), name=title, display="inline")
+                await cl.Message(content=title, elements=[img]).send()
+            else:
+                await cl.Message(content=f"{title} 未生成").send()
         elif t == "interrupt":
             resume_val = await _render_interrupt(msg.get("payload"))
             try:

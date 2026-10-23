@@ -6,7 +6,7 @@ frontend sends back. The frontend classifies/renders/parses (web/hitl.py) — th
 relays structured payloads. The socket is authenticated via ?token=<JWT> (see ws_uid) and thread_id
 must embed the caller's uid.
 
-Protocol: server->client {greeting,message,synthesis,interrupt,progress,bill,bill_close,done,error};
+Protocol: server->client {greeting,message,synthesis,interrupt,progress,bill,bill_close,chart(base64),done,error};
 client->server {query,resume,close}. Generic glue -> committed.
 """
 from __future__ import annotations
@@ -171,6 +171,12 @@ async def _run_flow_task(websocket: WebSocket, graph, config, text: str, respond
         state = await run_flow(graph, config, text, responder)
         # 摘要没推过时补推（如账期查询旁路：没有 interrupt，直接结束）
         await responder.push_bill(state)
+        # 多月利润报表：趋势图（base64 PNG，不落盘）单独推给前端显示（协议新增 chart 消息）
+        charts = (((state or {}).get("profit_result") or {}).get("charts") or [])
+        for item in charts:
+            if isinstance(item, dict) and item.get("b64"):
+                with contextlib.suppress(Exception):
+                    await _send(websocket, {"type": "chart", "data": item})
         close_md = (state or {}).get("bill_close_md")
         if close_md:
             await _send(websocket, {"type": "bill_close", "data": {"markdown": close_md}})
