@@ -88,3 +88,10 @@ src/bill/*
 账单_AI生成/
 # legacy per-shipper period folders (e.g. <shipper>-2026-10/) holding voucher PDFs; kept generic on purpose (no real shipper names)
 *-[0-9][0-9][0-9][0-9]-[0-9][0-9]/
+
+src/profit/*
+
+# 利润分析产物与业务规则（含全公司营收/成本/货主，不入库）
+dis.md
+profile_per_month.md
+司机奖金_规则.txt

@@ -90,10 +90,10 @@ class WSResponder:
             self._pending = None
 
     async def push_bill(self, state) -> bool:
-        """Push the bill markdown (summary or query result); identical content is not repeated."""
+        """Push the bill / profit markdown; identical content is not repeated."""
         if not isinstance(state, dict):
             return False
-        md = state.get("bill_render_md")
+        md = state.get("bill_render_md") or state.get("profit_render_md")
         if not md or md == self.bill_sent_md:
             return False
         await _send(self.ws, {"type": "bill", "data": {"markdown": md}})
