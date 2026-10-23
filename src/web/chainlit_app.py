@@ -30,7 +30,7 @@ from src.web.hitl import (
     parse_bill_period_edit, fmt_bill_view, parse_bill_run_pick, parse_bill_shipper_pick,
     looks_like_detail_question,
     PARAMS, AMBIGUITY, MILEAGE, FOLLOWUP, BILL_PERIOD, BILL_CLOSE_CONFIRM,
-    BILL_RUN_PICK, BILL_SHIPPER_PICK, PROFIT_RANGE,
+    BILL_RUN_PICK, BILL_SHIPPER_PICK, PROFIT_RANGE, PROFIT_FORECAST, parse_forecast_edit,
 )
 from src.web.render import render_synthesis
 from src.web.http_data_layer import HttpSessionsDataLayer
@@ -137,18 +137,24 @@ _EXAMPLES: list[tuple[str, str, str]] = [
      "说了「第几份」或出账编号就直接确认那一份，没说清才列候选让你选 → 确认归属期 → 写封账记录"),
     ("改封账", "把 2026-10 那份改成 2026-09 的应收",
      "提示受影响账期，并告知下一期基线已指向这份账单"),
+    ("利润分析", "生成 2026 年 1 月的利润分析",
+     "Excel（桌面「利润分析_AI生成」）：总览 + 每月六节（每趟利润 / 货主贡献 / 公里分档 / 盈亏平衡）；超过 2 个月只给文件路径"),
+    ("盈利预测", "预测 2026 年 10 月要跑多少趟、配多少司机和车",
+     "A 规则法 + B 趋势季节法，各给保守 / 中性 / 乐观三档：平衡趟数、司机、车辆、差距与预计盈亏（回看 24 个月，含税 9%）"),
 ]
 
-_WELCOME_HEAD = """你好，我是物流业务助手，能帮你做两件事：**线路报价**和**月度账单**。
+_WELCOME_HEAD = """你好，我是物流业务助手，能帮你做三件事：**线路报价**、**月度账单**、**利润分析与盈利预测**。
 下面每一行都是一句可以直接说的话——**点下面的按钮直接跑**，或挑一句复制发给我、照着自己改。"""
 
-_WELCOME_TAIL = """> 两点补充：
+_WELCOME_TAIL = """> 补充说明：
 > - 报价里的**理论报价**需要你在手机高德「货车模式」查双路线里程与桥费给我（货车路线是收费接口，暂未接入）。
 > - **出账**耗时较长（取数 + 生成上百张凭证），中途会显示进度；**封账**若同账期有多份账单，我会先列候选让你选，绝不默认取最新。
+> - **利润分析**支持 2017 年起的历史月份；单月/多月都会生成 Excel 到桌面；超过 2 个月时页面只给文件路径。
+> - **盈利预测**回看 24 个月，固定成本/工资/效率默认用均值，确认卡里可改（也可手工填写）。
 >
 > 忘了怎么说？直接发「帮助」或「示例」就行。
 >
-> **一个对话办一件事**：报价和账单（出账 / 查账 / 封账）建议分开对话——两者上下文不同，混在一个对话里历史列表会乱；若上一条还没处理完就改说别的，那条会被放弃。"""
+> **一个对话办一件事**：报价、账单（出账 / 查账 / 封账）、利润分析建议分开对话——上下文不同，混在一起历史列表会乱；若上一条还没处理完就改说别的，那条会被放弃。"""
 
 # NOTE on clickable starters: Chainlit only renders @cl.set_starters while the thread is EMPTY.
 # on_chat_start sends the welcome message immediately, so starters get disabled and unmounted within
@@ -158,7 +164,7 @@ _WELCOME_TAIL = """> 两点补充：
 # Only the examples that can really run end-to-end are clickable: the billing-generate one would write
 # a ledger row, and the box-trace one needs the user's own box number (XXXX1234567 is a placeholder),
 # so those two stay copy-only to avoid a stray click producing a real invoice or an empty lookup.
-_CLICKABLE = (0, 1)   # indexes into _EXAMPLES: 线路报价 / 查账期
+_CLICKABLE = (0, 1, 6)   # indexes into _EXAMPLES: 线路报价 / 查账期 / 利润分析（只读）
 
 # Short help phrases -> reply locally with the example table (no backend / LLM round-trip).
 _HELP_HINTS = ("帮助", "怎么用", "能做什么", "会做什么", "有什么功能", "有哪些功能",
@@ -430,6 +436,22 @@ async def _render_interrupt(payload) -> object:
             edits = parse_params_edit(_reply_text(m))
             return edits or True               # edited dict, or True if nothing parsed
         return True                            # confirm defaults (TRUTHY — never {})
+
+    if kind == PROFIT_FORECAST:
+        view = payload.get("forecast_view") or {} if isinstance(payload, dict) else {}
+        detail = "\n".join(f"- {k}：{v}" for k, v in view.items()) if isinstance(view, dict) else ""
+        actions = [cl.Action(name="confirm", label="确认，预测", payload={"choice": "confirm"}),
+                   cl.Action(name="modify", label="修改参数", payload={"choice": "modify"})]
+        res = await cl.AskActionMessage(content=ask + "\n\n" + detail,
+                                        actions=actions, timeout=_ASK_TIMEOUT).send()
+        if _action_payload(res).get("choice") == "modify":
+            m = await cl.AskUserMessage(
+                content="可修改：目标月份 / 回看 / 固定成本 / 工资 / 每司机趟数 / 每车趟数 / 备用率\n"
+                        "（键=值，空格分隔），如：目标月份=2026-11 固定成本=260000 工资=300000 每司机趟数=20",
+                timeout=_ASK_TIMEOUT).send()
+            edits = parse_forecast_edit(_reply_text(m))
+            return edits or True
+        return {"确认": True}
 
     if kind == PROFIT_RANGE:
         view = payload.get("profit_view") or {} if isinstance(payload, dict) else {}
