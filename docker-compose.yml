@@ -21,7 +21,10 @@ services:
       retries: 10
 
   qdrant:
-    image: qdrant/qdrant:latest
+    # Pin the version: ./data/qdrant-server is only readable by compatible versions, so a floating
+    # "latest" could break the mounted storage after a host rebuild. v1.19.1 is the exact build this
+    # data was written with. Absolute lock (optional): qdrant/qdrant@sha256:12364fe851b9f17356fc88189fc06d1b521262e04659ec7345975b00c9246a10
+    image: qdrant/qdrant:v1.19.1
     container_name: estimate-qdrant
     ports:
       - "6333:6333"   # HTTP (mem0 connects here)
