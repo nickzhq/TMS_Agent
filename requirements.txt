@@ -35,3 +35,4 @@ pywin32                 # Windows-only: Excel COM to dump legacy .xls (prior-mon
 # - multi-user production: swap in langgraph-checkpoint-postgres + PostgreSQL
 # - password hashing uses the stdlib (hashlib.pbkdf2_hmac, PBKDF2-HMAC-SHA256) -> no passlib/bcrypt needed
 # - the knowledge base is an external Go service (called via REST/MCP), not a Python package
+matplotlib
