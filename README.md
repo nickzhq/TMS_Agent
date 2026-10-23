@@ -114,7 +114,7 @@ chainlit run src/web/chainlit_app.py --port 8001
 
 Bill Agent 已作为子流程**编排进现有 LangGraph**（与估价 Agent 同一状态图 / 入口，按意图路由：`domain` + `bill_action` 二级分流，**出账 / 账期查询 / 封账三条链路均已打通**）。样板货主见本地模板配置（`agents/bill/shippers.yaml`，不入库），业务规则以**可替换模板**外置（换货主 = 换配置）。
 
-- **利润分析 Profit Agent**（事后复盘）：按月份区间统计每趟利润 / 货主贡献 / 公里分档 / 盈亏平衡，产出 Excel（桌面 `利润分析/`）。已编排进同一状态图（`domain=profit` → 区间确认 → 生成 → 摘要 / 文件指引）；业务实现（`src/profit/`、`agents/profit/`）与口径属公司资产，不在本仓库体现。
+- **利润分析 Profit Agent**（事后复盘）：按月份区间统计每趟利润 / 货主贡献 / 公里分档 / 盈亏平衡，产出 Excel（桌面 `利润分析_AI生成/`）。已编排进同一状态图（`domain=profit` → 区间确认 → 生成 → 摘要 / 文件指引）；业务实现（`src/profit/`、`agents/profit/`）与口径属公司资产，不在本仓库体现。
 
 > 需求、数据口径、字段映射与实现说明详见 **`docs/bill.md`**（本地文档，**涉及公司敏感信息，不入库**）。
 > 注：`docs/bill.md`、账单相关的 Excel 产物、`账单_tmp/`、以及含真实数据的凭证文件夹均属公司财产，已在 `.gitignore` 中排除，不入库。

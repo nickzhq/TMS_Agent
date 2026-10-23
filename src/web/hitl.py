@@ -17,7 +17,8 @@ BILL_PERIOD = "bill_period"                 # {"ask", "bill": {...}, "bill_view"
 BILL_CLOSE_CONFIRM = "bill_close_confirm"   # {"ask", "bill_close": {...}} -> 封账 / 不封 / 改归属期
 BILL_RUN_PICK = "bill_run_pick"             # {"ask", "bill_runs": [...]} -> 从候选账单里选一份（批3.2）
 BILL_SHIPPER_PICK = "bill_shipper_pick"     # {"ask", "bill_shipper_candidates": [...]} -> 选货主（批3.2）
-PROFIT_RANGE = "profit_range"               # {"ask", "profit_view": {...}, "profit": {start,end}} -> 确认/修改月份区间
+PROFIT_RANGE = "profit_range"               # {"ask", "profit_view": {...}} -> 确认/修改月份区间
+PROFIT_FORECAST = "profit_forecast"         # {"ask", "forecast_view": {...}} -> 确认/修改预测参数
 UNKNOWN = "unknown"
 
 _NUM = re.compile(r"-?\d+(?:\.\d+)?")
@@ -36,6 +37,8 @@ def classify_interrupt(payload) -> str:
         return BILL_SHIPPER_PICK
     if payload.get("profit_view") is not None:
         return PROFIT_RANGE
+    if payload.get("forecast_view") is not None:
+        return PROFIT_FORECAST
     if payload.get("candidates"):
         return AMBIGUITY
     if payload.get("bill_close") is not None:
@@ -50,6 +53,19 @@ def classify_interrupt(payload) -> str:
     if any(w in ask for w in ("加载更多", "三价对照", "换货主", "不走高速价")):
         return FOLLOWUP
     return UNKNOWN
+
+
+_FORECAST_KEYS = {"目标月份", "回看", "固定成本", "工资", "每司机趟数", "每车趟数", "备用率"}
+
+
+def parse_forecast_edit(text: str) -> dict:
+    """解析预测参数的「键=值」修改（如：目标月份=2026-11 固定成本=260000）。"""
+    out: dict = {}
+    for m in _KV.finditer(text or ""):
+        k, v = m.group(1), m.group(2)
+        if k in _FORECAST_KEYS:
+            out[k] = v
+    return out
 
 
 def candidate_label(c) -> str:
