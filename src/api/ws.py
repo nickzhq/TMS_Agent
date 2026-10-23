@@ -15,6 +15,7 @@ import asyncio
 import contextlib
 import json
 import logging
+import uuid
 from decimal import Decimal
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
@@ -27,6 +28,16 @@ from src.web.hitl import classify_interrupt, FOLLOWUP, BILL_CLOSE_CONFIRM
 
 logger = logging.getLogger("estimate.api.ws")
 router = APIRouter()
+
+
+def _is_uuid(value: str) -> bool:
+    """Chainlit thread ids are UUIDs. Test clients may use arbitrary ids; creating a history row
+    for them leaves a "ghost" chat (a title but no steps) that cannot be opened."""
+    try:
+        uuid.UUID(str(value))
+        return True
+    except (ValueError, TypeError, AttributeError):
+        return False
 
 
 def _json_default(o):
@@ -209,7 +220,9 @@ async def ws_inquiry(websocket: WebSocket, thread_id: str):
                 def _sink(msg: str) -> None:
                     progress_queue.put_nowait(str(msg))
                 row = await app["sessions"].get(thread_id)
-                if not row or not row.get("title"):    # first message -> title the thread + learn prefs
+                # Only Chainlit-style UUID threads become history rows: a non-UUID test thread would
+                # otherwise show up as a chat with a title but zero steps (cannot be opened).
+                if (row is None or not row.get("title")) and _is_uuid(thread_id):
                     await app["sessions"].upsert_thread(thread_id, uid, text.replace("\n", " ")[:24] or "询价")
                     if text:
                         _spawn_learn(uid, text)
