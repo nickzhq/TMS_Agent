@@ -83,5 +83,6 @@ src/bill/*
 *-[0-9][0-9][0-9][0-9]-[0-9][0-9]/
 
 src/profit/*
+src/explain/*
 
 .files/
