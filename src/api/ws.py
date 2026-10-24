@@ -104,7 +104,8 @@ class WSResponder:
         """Push the bill / profit markdown; identical content is not repeated."""
         if not isinstance(state, dict):
             return False
-        md = state.get("bill_render_md") or state.get("profit_render_md")
+        # 解释轮优先推 explain_md：state 跨轮累积，旧的 profit/bill 摘要不能抢在前头
+        md = state.get("explain_md") or state.get("bill_render_md") or state.get("profit_render_md")
         if not md or md == self.bill_sent_md:
             return False
         await _send(self.ws, {"type": "bill", "data": {"markdown": md}})
