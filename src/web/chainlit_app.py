@@ -32,6 +32,7 @@ from src.web.hitl import (
     looks_like_detail_question,
     PARAMS, AMBIGUITY, MILEAGE, FOLLOWUP, BILL_PERIOD, BILL_CLOSE_CONFIRM,
     BILL_RUN_PICK, BILL_SHIPPER_PICK, PROFIT_RANGE, PROFIT_FORECAST, parse_forecast_edit,
+    WT_PERIOD, WT_CONFIRM, fmt_wt_view, parse_wt_period_edit, parse_wt_confirm_answer,
 )
 from src.web.render import render_synthesis
 from src.web.http_data_layer import HttpSessionsDataLayer
@@ -144,9 +145,11 @@ _EXAMPLES: list[tuple[str, str, str]] = [
      "A 规则法 + B 趋势季节法，各给保守 / 中性 / 乐观三档：平衡趟数、司机、车辆、差距与预计盈亏（回看 24 个月，含税 9%）"),
     ("财务利润表", "生成 2026 年 2 月的利润表",
      "按公司财务模板生成 Excel（桌面「利润表_AI生成」）：只填箱量 / 公里 / 桥票 / 油费 / 租车 / 营业收入 6 个字段，其余留空"),
+    ("对账单", "生成 2026 年 11 月的对账单",
+     "按货主模板一票一行，按发票类型分四列（运输6% / 港荣6% / 国际0% / 运费0%）；自动核对收费清单 PDF，缺凭证标黄、算不出数标红；运费0%列留空由你出表后手工填"),
 ]
 
-_WELCOME_HEAD = """你好，我是物流业务助手，能帮你做这几件事：**线路报价**、**月度账单**、**利润分析与盈利预测**、**财务利润表**；
+_WELCOME_HEAD = """你好，我是物流业务助手，能帮你做这几件事：**线路报价**、**月度账单**、**对账单**、**利润分析与盈利预测**、**财务利润表**；
 结果里的术语或数字不懂，也可以直接问我（比如“P25 是什么”“平衡趟数怎么算”）。
 下面每一行都是一句可以直接说的话——**点下面的按钮直接跑**，或挑一句复制发给我、照着自己改。"""
 
@@ -157,6 +160,8 @@ _WELCOME_TAIL = """> 补充说明：
 > - **盈利预测**回看 24 个月，固定成本/工资/效率默认用均值，确认卡里可改（也可手工填写）。
 > - **财务利润表**按公司模板生成，只填 6 个可统计字段（箱量 / 公里 / 桥票 / 油费 / 租车 / 营业收入），其余留空；
 >   单月只填该月，不会带出其他月份；箱量与营业收入单元格会显示口径提示。
+> - **对账单**按货主自己的版式（一票一行 + 四个发票桶），与月度账单（宽表）是两套东西；
+>   应收运费 = 明细金额 − 直收金额；「运费0%票」列恒为 0，出表后由你手工把免税部分从运输6% 移过去。
 >
 > 忘了怎么说？直接发「帮助」或「示例」就行。
 >
@@ -490,6 +495,33 @@ async def _render_interrupt(payload) -> object:
             text = _reply_text(m).strip()
             return {"区间": text} if text else True     # TRUTHY
         return {"确认": True}
+
+    if kind == WT_PERIOD:
+        view = (payload.get("wt_view") or {}) if isinstance(payload, dict) else {}
+        actions = [cl.Action(name="confirm", label="确认，生成", payload={"choice": "confirm"}),
+                   cl.Action(name="modify", label="改账期", payload={"choice": "modify"})]
+        res = await cl.AskActionMessage(content=ask + "\n\n" + fmt_wt_view(view),
+                                        actions=actions, timeout=_ASK_TIMEOUT).send()
+        if _action_payload(res).get("choice") == "modify":
+            m = await cl.AskUserMessage(
+                content="请输入对账单账期（如 2026-11 或 2026年11月）",
+                timeout=_ASK_TIMEOUT).send()
+            return parse_wt_period_edit(_reply_text(m))
+        return {"确认": True}               # TRUTHY — never {}
+
+    if kind == WT_CONFIRM:
+        view = (payload.get("wt_view") or {}) if isinstance(payload, dict) else {}
+        manual = (payload.get("wt_manual") or []) if isinstance(payload, dict) else []
+        detail = fmt_wt_view(view)
+        if manual:
+            detail += "\n\n待人工（红行）：\n" + "\n".join(
+                f"- {r.get('bh')}：{r.get('reason')}" for r in manual[:8])
+        actions = [cl.Action(name="ok", label="确认，生成账单", payload={"choice": "ok"}),
+                   cl.Action(name="skip", label="先跳过（先出红行版）", payload={"choice": "skip"})]
+        res = await cl.AskActionMessage(content=ask + "\n\n" + detail,
+                                        actions=actions, timeout=_ASK_TIMEOUT).send()
+        choice = _action_payload(res).get("choice")
+        return {"action": "skip"} if choice == "skip" else {"action": "ok"}
 
     if kind == BILL_PERIOD:
         view = (payload.get("bill_view") or payload.get("bill", {})) if isinstance(payload, dict) else {}

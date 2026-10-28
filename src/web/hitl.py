@@ -19,6 +19,8 @@ BILL_RUN_PICK = "bill_run_pick"             # {"ask", "bill_runs": [...]} -> 从
 BILL_SHIPPER_PICK = "bill_shipper_pick"     # {"ask", "bill_shipper_candidates": [...]} -> 选货主（批3.2）
 PROFIT_RANGE = "profit_range"               # {"ask", "profit_view": {...}} -> 确认/修改月份区间
 PROFIT_FORECAST = "profit_forecast"         # {"ask", "forecast_view": {...}} -> 确认/修改预测参数
+WT_PERIOD = "wt_period"                     # {"ask", "wt_view": {...}} -> 确认/修改对账单账期
+WT_CONFIRM = "wt_confirm"                   # {"ask", "wt_view", "wt_manual"} -> 确认 / 跳过（都照常出账）
 UNKNOWN = "unknown"
 
 _NUM = re.compile(r"-?\d+(?:\.\d+)?")
@@ -39,6 +41,10 @@ def classify_interrupt(payload) -> str:
         return PROFIT_RANGE
     if payload.get("forecast_view") is not None:
         return PROFIT_FORECAST
+    if payload.get("wt_can_skip") is not None:
+        return WT_CONFIRM
+    if payload.get("wt_view") is not None:
+        return WT_PERIOD
     if payload.get("candidates"):
         return AMBIGUITY
     if payload.get("bill_close") is not None:
@@ -237,3 +243,35 @@ def parse_bill_shipper_pick(text: str) -> dict:
     空回复 -> {"货主": ""}（非空 dict = truthy；节点匹配不到就不执行）。
     """
     return {"货主": (text or "").strip()}
+
+
+# ---------- 对账单域（bill_wt）----------
+
+def fmt_wt_view(view: dict) -> str:
+    """对账单确认卡/账期卡的键值对 -> 列表行。"""
+    if not isinstance(view, dict):
+        return ""
+    return "\n".join(f"- {k}：{v}" for k, v in view.items())
+
+
+def parse_wt_period_edit(text: str) -> dict:
+    """账期修改回传 -> {"账期": "..."}（节点用 parse_period_hint 再解析）。
+
+    空回复 -> {"确认": True}（不能返回 {}：空 dict 会被当成没恢复）。
+    """
+    t = (text or "").strip()
+    return {"账期": t} if t else {"确认": True}
+
+
+_WT_SKIP = ("跳过", "先跳", "稍后", "不确认", "待补", "skip", "later")
+
+
+def parse_wt_confirm_answer(text: str) -> dict:
+    """确认卡 -> {"action": "skip"} 或 {"action": "ok"}。
+
+    两个出口都照常出账（跳过 = 先出红行版，事后补）；所以这里**永远返回 truthy**。
+    """
+    t = (text or "").strip().lower()
+    if any(w in t for w in _WT_SKIP):
+        return {"action": "skip"}
+    return {"action": "ok"}

@@ -26,6 +26,13 @@ class LLMSettings(BaseModel):
     embedding_api_key: str = ""                  # mem0 embedder key (falls back to api_key)
     embedding_model: str = ""                      # mem0 embedder model; set EMBEDDING_MODEL in .env (verify via tests/test_p7_embedding)
 
+    # 视觉（发票税率识别）：**默认用主模型**——实测主模型可直接吃图，
+    # 与专用 VL 模型逐张比对 26/26 一致（2026-10-28），故不再单独指定模型/端点。
+    # 仅在“主模型突然不支持图片”时用 vision_* 显式覆盖。
+    vision_model: str = ""                        # 空 -> 用上面的 model
+    vision_base_url: str = ""                      # 空 -> 用上面的 base_url
+    vision_api_key: str = ""                       # 空 -> 用上面的 api_key
+
 
 class DbSettings(BaseModel):
     """Database connection (pyodbc, read-only account; credentials via env vars, never committed).
