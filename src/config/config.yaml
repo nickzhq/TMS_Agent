@@ -10,6 +10,12 @@ llm:
   embedding_base_url: ${EMBEDDING_BASE_URL}   # e.g. https://dashscope.aliyuncs.com/compatible-mode/v1
   embedding_api_key:  ${EMBEDDING_API_KEY}    # separate key (the chat MaaS key 401s on DashScope)
   embedding_model:    ${EMBEDDING_MODEL}      # e.g. text-embedding-v4; verify via tests/test_p7_embedding
+  # 视觉（发票税率识别）**默认用主模型**（上面的 model + base_url + api_key）；
+  # 实测主模型可直接吃图、与专用 VL 模型逐张比对 26/26 一致（2026-10-28）。
+  # 仅当主模型突然不支持图片时才加下面三个键显式覆盖（值建议写 ${VISION_*} 并在 .env 里给值）：
+  #   vision_model:    ${VISION_MODEL}
+  #   vision_base_url: ${VISION_BASE_URL}
+  #   vision_api_key:  ${VISION_API_KEY}
 
 db:                             # pyodbc direct connection (read-only account, credentials via env vars)
   connection_string: ${MSSQL_CONNECTION_STRING}   # preferred: full string (expanded from .env; real value only in .env, never written here)

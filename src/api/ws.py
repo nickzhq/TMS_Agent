@@ -105,7 +105,8 @@ class WSResponder:
         if not isinstance(state, dict):
             return False
         # 解释轮优先推 explain_md：state 跨轮累积，旧的 profit/bill 摘要不能抢在前头
-        md = (state.get("statement_render_md") or state.get("explain_md")
+        md = (state.get("wt_render_md") or state.get("statement_render_md")
+              or state.get("explain_md")
               or state.get("bill_render_md") or state.get("profit_render_md"))
         if not md or md == self.bill_sent_md:
             return False
