@@ -23,6 +23,7 @@ WT_PERIOD = "wt_period"                     # {"ask", "wt_view": {...}} -> 确�
 WT_CONFIRM = "wt_confirm"                   # {"ask", "wt_view", "wt_manual"} -> 确认 / 跳过（都照常出账）
 INVOICE_CONFIRM = "invoice_confirm"         # {"ask", "invoice_view", "invoice_preview"} -> 确认 / 放弃（写发票库前）
 WT_CLOSE_CONFIRM = "wt_close_confirm"       # {"ask", "wt_close_view", "wt_close_diff"} -> 封账 / 改封账前确认
+WT_CLOSE_PROMPT = "wt_close_prompt"         # {"ask", "wt_close_view", "wt_close_prompt": True} -> 出账后问“封不封”
 UNKNOWN = "unknown"
 
 _NUM = re.compile(r"-?\d+(?:\.\d+)?")
@@ -47,6 +48,8 @@ def classify_interrupt(payload) -> str:
         return WT_CONFIRM
     if payload.get("invoice_view") is not None:
         return INVOICE_CONFIRM
+    if payload.get("wt_close_prompt"):
+        return WT_CLOSE_PROMPT
     if payload.get("wt_close_view") is not None:
         return WT_CLOSE_CONFIRM
     if payload.get("wt_view") is not None:
@@ -296,9 +299,24 @@ def parse_invoice_confirm(text: str) -> dict:
     return {"确认": True}
 
 
-def parse_wt_close_answer(text: str) -> dict:
-    """封账/改封账确认 -> {"放弃": True} 或 {"确认": True}（均 truthy）。"""
+# 封账/改封账确认与“写发票库前确认”是同一件事：确认 → {"确认": True}，否则 {"放弃": True}。
+# 共用一份实现，避免两个函数各自漂移（曾经两份代码逐字相同）。
+parse_wt_close_answer = parse_invoice_confirm
+
+
+_WT_NO_CLOSE = ("不封", "暂不", "先不", "不用封", "不封账", "later")
+_WT_YES_CLOSE = ("封账", "封吧", "确认封", "封", "好", "可以", "确认", "ok", "yes")
+
+
+def parse_wt_close_prompt(text: str) -> dict:
+    """出账后的“封不封” -> {"封账": True} 或 {"不封": True}（均 truthy）。
+
+    与账单域一致（写操作保守）：
+    - 空回复 / 看不出来 -> **不封**，但必须返回非空 dict。
+    """
     t = (text or "").strip().lower()
-    if any(w in t for w in _INV_CANCEL):
-        return {"放弃": True}
-    return {"确认": True}
+    if any(w in t for w in _WT_NO_CLOSE):
+        return {"不封": True}
+    if any(w in t for w in _WT_YES_CLOSE):
+        return {"封账": True}
+    return {"不封": True}
