@@ -34,6 +34,7 @@ from src.web.hitl import (
     BILL_RUN_PICK, BILL_SHIPPER_PICK, PROFIT_RANGE, PROFIT_FORECAST, parse_forecast_edit,
     WT_PERIOD, WT_CONFIRM, fmt_wt_view, parse_wt_period_edit, parse_wt_confirm_answer,
     INVOICE_CONFIRM, parse_invoice_confirm,
+    WT_CLOSE_CONFIRM, parse_wt_close_answer,
 )
 from src.web.render import render_synthesis
 from src.web.http_data_layer import HttpSessionsDataLayer
@@ -500,6 +501,19 @@ async def _render_interrupt(payload) -> object:
             text = _reply_text(m).strip()
             return {"区间": text} if text else True     # TRUTHY
         return {"确认": True}
+
+    if kind == WT_CLOSE_CONFIRM:
+        view = (payload.get("wt_close_view") or {}) if isinstance(payload, dict) else {}
+        diff = (payload.get("wt_close_diff") or "") if isinstance(payload, dict) else ""
+        content = ask + "\n\n" + fmt_wt_view(view)
+        if diff:
+            content += "\n\n" + diff
+        actions = [cl.Action(name="ok", label="确认", payload={"choice": "ok"}),
+                   cl.Action(name="cancel", label="放弃", payload={"choice": "cancel"})]
+        res = await cl.AskActionMessage(content=content, actions=actions,
+                                        timeout=_ASK_TIMEOUT).send()
+        return parse_wt_close_answer("放弃" if _action_payload(res).get("choice") == "cancel"
+                                     else "确认")
 
     if kind == INVOICE_CONFIRM:
         view = (payload.get("invoice_view") or {}) if isinstance(payload, dict) else {}

@@ -22,6 +22,7 @@ PROFIT_FORECAST = "profit_forecast"         # {"ask", "forecast_view": {...}} ->
 WT_PERIOD = "wt_period"                     # {"ask", "wt_view": {...}} -> 确认/修改对账单账期
 WT_CONFIRM = "wt_confirm"                   # {"ask", "wt_view", "wt_manual"} -> 确认 / 跳过（都照常出账）
 INVOICE_CONFIRM = "invoice_confirm"         # {"ask", "invoice_view", "invoice_preview"} -> 确认 / 放弃（写发票库前）
+WT_CLOSE_CONFIRM = "wt_close_confirm"       # {"ask", "wt_close_view", "wt_close_diff"} -> 封账 / 改封账前确认
 UNKNOWN = "unknown"
 
 _NUM = re.compile(r"-?\d+(?:\.\d+)?")
@@ -46,6 +47,8 @@ def classify_interrupt(payload) -> str:
         return WT_CONFIRM
     if payload.get("invoice_view") is not None:
         return INVOICE_CONFIRM
+    if payload.get("wt_close_view") is not None:
+        return WT_CLOSE_CONFIRM
     if payload.get("wt_view") is not None:
         return WT_PERIOD
     if payload.get("candidates"):
@@ -287,6 +290,14 @@ _INV_CANCEL = ("放弃", "取消", "算了", "不改", "不作废", "cancel", "n
 
 def parse_invoice_confirm(text: str) -> dict:
     """写发票库前的确认 -> {"放弃": True} 或 {"确认": True}（均 truthy）。"""
+    t = (text or "").strip().lower()
+    if any(w in t for w in _INV_CANCEL):
+        return {"放弃": True}
+    return {"确认": True}
+
+
+def parse_wt_close_answer(text: str) -> dict:
+    """封账/改封账确认 -> {"放弃": True} 或 {"确认": True}（均 truthy）。"""
     t = (text or "").strip().lower()
     if any(w in t for w in _INV_CANCEL):
         return {"放弃": True}
