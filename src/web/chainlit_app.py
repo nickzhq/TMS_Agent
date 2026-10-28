@@ -35,6 +35,7 @@ from src.web.hitl import (
     WT_PERIOD, WT_CONFIRM, fmt_wt_view, parse_wt_period_edit, parse_wt_confirm_answer,
     INVOICE_CONFIRM, parse_invoice_confirm,
     WT_CLOSE_CONFIRM, parse_wt_close_answer,
+    WT_CLOSE_PROMPT, parse_wt_close_prompt,
 )
 from src.web.render import render_synthesis
 from src.web.http_data_layer import HttpSessionsDataLayer
@@ -424,6 +425,28 @@ async def _pump(ws: BackendWS) -> None:
             return
 
 
+async def _ask_choice(content: str, actions: list) -> str:
+    """弹一张动作卡，返回所点动作的 choice（未选 / 超时返回空串）。"""
+    res = await cl.AskActionMessage(content=content, actions=actions,
+                                    timeout=_ASK_TIMEOUT).send()
+    return str(_action_payload(res).get("choice") or "")
+
+
+def _card_content(ask: str, payload, key: str, *, extra_key: str = "",
+                  extra_label: str = "") -> str:
+    """确认卡正文：ask + 键值视图 + 可选附加段（逐票差异 / 当前记录）。
+
+    几张卡（封账确认、改封账、发票写入确认）原本各拼一遍字符串，
+    抽出来保证“同样的卡长得一样”，也少一处漏加分隔线的机会。
+    """
+    view = (payload.get(key) or {}) if isinstance(payload, dict) else {}
+    content = (ask + "\n\n" + fmt_wt_view(view)).rstrip()
+    extra = (payload.get(extra_key) or "") if (extra_key and isinstance(payload, dict)) else ""
+    if isinstance(extra, str) and extra.strip():
+        content += "\n\n" + (extra_label + extra if extra_label else extra)
+    return content
+
+
 async def _render_interrupt(payload) -> object:
     """Render one interrupt with Chainlit Ask* and return a TRUTHY resume value. Mirrors the old
     in-process responder, now fed by the backend's payload over WS; parsing stays in web/hitl.py.
@@ -502,30 +525,26 @@ async def _render_interrupt(payload) -> object:
             return {"区间": text} if text else True     # TRUTHY
         return {"确认": True}
 
+    if kind == WT_CLOSE_PROMPT:
+        content = _card_content(ask, payload, "wt_close_view")
+        choice = await _ask_choice(content, [
+            cl.Action(name="close", label="封账，定稿", payload={"choice": "close"}),
+            cl.Action(name="noclose", label="先不封", payload={"choice": "noclose"})])
+        return parse_wt_close_prompt("不封" if choice == "noclose" else "封账")
+
     if kind == WT_CLOSE_CONFIRM:
-        view = (payload.get("wt_close_view") or {}) if isinstance(payload, dict) else {}
-        diff = (payload.get("wt_close_diff") or "") if isinstance(payload, dict) else ""
-        content = ask + "\n\n" + fmt_wt_view(view)
-        if diff:
-            content += "\n\n" + diff
-        actions = [cl.Action(name="ok", label="确认", payload={"choice": "ok"}),
-                   cl.Action(name="cancel", label="放弃", payload={"choice": "cancel"})]
-        res = await cl.AskActionMessage(content=content, actions=actions,
-                                        timeout=_ASK_TIMEOUT).send()
-        return parse_wt_close_answer("放弃" if _action_payload(res).get("choice") == "cancel"
-                                     else "确认")
+        content = _card_content(ask, payload, "wt_close_view", extra_key="wt_close_diff")
+        choice = await _ask_choice(content, [
+            cl.Action(name="ok", label="确认", payload={"choice": "ok"}),
+            cl.Action(name="cancel", label="放弃", payload={"choice": "cancel"})])
+        return parse_wt_close_answer("放弃" if choice == "cancel" else "确认")
 
     if kind == INVOICE_CONFIRM:
-        view = (payload.get("invoice_view") or {}) if isinstance(payload, dict) else {}
-        preview = (payload.get("invoice_preview") or "") if isinstance(payload, dict) else ""
-        detail = fmt_wt_view(view)
-        if preview:
-            detail += "\n\n当前库里的记录：\n" + preview
-        actions = [cl.Action(name="ok", label="确认执行", payload={"choice": "ok"}),
-                   cl.Action(name="cancel", label="放弃", payload={"choice": "cancel"})]
-        res = await cl.AskActionMessage(content=ask + "\n\n" + detail,
-                                        actions=actions, timeout=_ASK_TIMEOUT).send()
-        choice = _action_payload(res).get("choice")
+        content = _card_content(ask, payload, "invoice_view",
+                                extra_key="invoice_preview", extra_label="当前库里的记录：\n")
+        choice = await _ask_choice(content, [
+            cl.Action(name="ok", label="确认执行", payload={"choice": "ok"}),
+            cl.Action(name="cancel", label="放弃", payload={"choice": "cancel"})])
         return {"放弃": True} if choice == "cancel" else {"确认": True}
 
     if kind == WT_PERIOD:
