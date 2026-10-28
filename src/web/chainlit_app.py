@@ -33,6 +33,7 @@ from src.web.hitl import (
     PARAMS, AMBIGUITY, MILEAGE, FOLLOWUP, BILL_PERIOD, BILL_CLOSE_CONFIRM,
     BILL_RUN_PICK, BILL_SHIPPER_PICK, PROFIT_RANGE, PROFIT_FORECAST, parse_forecast_edit,
     WT_PERIOD, WT_CONFIRM, fmt_wt_view, parse_wt_period_edit, parse_wt_confirm_answer,
+    INVOICE_CONFIRM, parse_invoice_confirm,
 )
 from src.web.render import render_synthesis
 from src.web.http_data_layer import HttpSessionsDataLayer
@@ -147,6 +148,8 @@ _EXAMPLES: list[tuple[str, str, str]] = [
      "按公司财务模板生成 Excel（桌面「利润表_AI生成」）：只填箱量 / 公里 / 桥票 / 油费 / 租车 / 营业收入 6 个字段，其余留空"),
     ("对账单", "生成 2026 年 11 月的对账单",
      "按货主模板一票一行，按发票类型分四列（运输6% / 港荣6% / 国际0% / 运费0%）；自动核对收费清单 PDF，缺凭证标黄、算不出数标红；运费0%列留空由你出表后手工填"),
+    ("发票税率", "2026 年 11 月还有哪些发票待确认",
+     "查发票（按发票号 / 提单号 / 月份）、改税率、作废、手工登记；改税率前会让确认，且只有财务/管理员能改"),
 ]
 
 _WELCOME_HEAD = """你好，我是物流业务助手，能帮你做这几件事：**线路报价**、**月度账单**、**对账单**、**利润分析与盈利预测**、**财务利润表**；
@@ -162,6 +165,8 @@ _WELCOME_TAIL = """> 补充说明：
 >   单月只填该月，不会带出其他月份；箱量与营业收入单元格会显示口径提示。
 > - **对账单**按货主自己的版式（一票一行 + 四个发票桶），与月度账单（宽表）是两套东西；
 >   应收运费 = 明细金额 − 直收金额；「运费0%票」列恒为 0，出表后由你手工把免税部分从运输6% 移过去。
+> - **发票税率**可以直接对话维护：查询 / 待确认清单任何人可看；改税率、作废、登记需要财务或管理员，
+>   改之前会先让你看一眼当前记录再确认。
 >
 > 忘了怎么说？直接发「帮助」或「示例」就行。
 >
@@ -495,6 +500,19 @@ async def _render_interrupt(payload) -> object:
             text = _reply_text(m).strip()
             return {"区间": text} if text else True     # TRUTHY
         return {"确认": True}
+
+    if kind == INVOICE_CONFIRM:
+        view = (payload.get("invoice_view") or {}) if isinstance(payload, dict) else {}
+        preview = (payload.get("invoice_preview") or "") if isinstance(payload, dict) else ""
+        detail = fmt_wt_view(view)
+        if preview:
+            detail += "\n\n当前库里的记录：\n" + preview
+        actions = [cl.Action(name="ok", label="确认执行", payload={"choice": "ok"}),
+                   cl.Action(name="cancel", label="放弃", payload={"choice": "cancel"})]
+        res = await cl.AskActionMessage(content=ask + "\n\n" + detail,
+                                        actions=actions, timeout=_ASK_TIMEOUT).send()
+        choice = _action_payload(res).get("choice")
+        return {"放弃": True} if choice == "cancel" else {"确认": True}
 
     if kind == WT_PERIOD:
         view = (payload.get("wt_view") or {}) if isinstance(payload, dict) else {}
