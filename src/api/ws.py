@@ -104,9 +104,9 @@ class WSResponder:
         """Push the bill / profit markdown; identical content is not repeated."""
         if not isinstance(state, dict):
             return False
-        # 解释轮优先推 explain_md：state 跨轮累积，旧的 profit/bill 摘要不能抢在前头
-        md = (state.get("wt_render_md") or state.get("statement_render_md")
-              or state.get("explain_md")
+        # 本轮域优先：发票主数据 > 对账单 > 利润表 > 解释 > 账单 > 利润
+        md = (state.get("invoice_md") or state.get("wt_render_md")
+              or state.get("statement_render_md") or state.get("explain_md")
               or state.get("bill_render_md") or state.get("profit_render_md"))
         if not md or md == self.bill_sent_md:
             return False
@@ -239,10 +239,13 @@ async def ws_inquiry(websocket: WebSocket, thread_id: str):
                 # (b4f6bbe8...). The JWT only carries uid, so resolve the username from the user
                 # store; fall back to the uid so a lookup failure never blocks billing.
                 bill_user = uid
+                user_role = "viewer"          # fail-closed：拿不到角色就当只读
                 with contextlib.suppress(Exception):
                     user_row = await app["users"].get_by_id(uid)
                     bill_user = (user_row or {}).get("username") or uid
-                config = default_config(thread_id, bill_progress=_sink, bill_user=bill_user)
+                    user_role = (user_row or {}).get("role") or "viewer"
+                config = default_config(thread_id, bill_progress=_sink,
+                                        bill_user=bill_user, user_role=user_role)
                 flow_task = asyncio.create_task(
                     _run_flow_task(websocket, graph, config, text, responder, progress_queue))
             elif mtype == "resume":
