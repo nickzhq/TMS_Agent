@@ -35,7 +35,7 @@ chainlit.md
 # note: data/chainlit.log (and everything under data/) is already ignored by the data/* rule below
 
 # Avatars: keep the README (documents the ASCII-id rule), never the logo image itself -
-# it is a private asset. A missing file falls back to Chainlit's favicon (still 200, no error).
+# it is a company asset. A missing file falls back to Chainlit's favicon (still 200, no error).
 public/avatars/*
 !public/avatars/README.md
 
@@ -64,11 +64,11 @@ AGENTS.md
 # any SQL asset
 *.sql
 
-# src/agents/: local-only sub-agent implementations; keep empty folder
+# src/agents/: business sub-agent node implementations (P3+); keep empty folder
 src/agents/*
 !src/agents/.gitkeep
 
-# src/graph/: LangGraph orchestration; keep empty folder
+# src/graph/: LangGraph orchestration (business flow, P4+); keep empty folder
 src/graph/*
 !src/graph/.gitkeep
 
@@ -79,6 +79,8 @@ src/bill/*
 # Office documents / spreadsheets (local artifacts, never uploaded)
 *.xls
 *.xlsx
+*.doc
+*.docx
 # Local YYYY-MM artifact folders (generic pattern, no real names)
 *-[0-9][0-9][0-9][0-9]-[0-9][0-9]/
 
